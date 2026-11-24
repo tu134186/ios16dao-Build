@@ -702,6 +702,67 @@ static NSArray<UIView *> *DAOPills(void) {
     return out;
 }
 
+// 录屏红点：SBRecordingIndicatorView / Window 里的那个小圆点（1.5~26pt）
+static NSArray<UIView *> *DAORecordingDots(void) {
+    NSMutableArray<UIView *> *out = [NSMutableArray array];
+    NSMutableArray<UIView *> *stack = [NSMutableArray array];
+    for (UIWindow *w in DAOAllWindows()) {
+        if (gOverlay && w == gOverlay) continue;
+        [stack addObject:w];
+    }
+    while (stack.count) {
+        UIView *v = stack.lastObject; [stack removeLastObject];
+        NSString *cn = NSStringFromClass(v.class);
+        if ([cn containsString:@"RecordingIndicator"]) {
+            CGSize b = v.bounds.size;
+            CGFloat m = MAX(b.width, b.height);
+            CGFloat n = MIN(b.width, b.height);
+            if (m >= 1.5 && m <= 30.0 && n >= 1.0 && v.window && !v.hidden) {
+                CGRect r = DAOScreenRect(v);
+                if (DAOOnScreen(r)) [out addObject:v];
+            }
+        }
+        for (UIView *s in v.subviews) [stack addObject:s];
+    }
+    return out;
+}
+
+// 选出属于这块岛的红点：屏幕矩形与岛矩形相交（±4pt 容差）
+static UIView *DAODotInPill(UIView *pill) {
+    CGRect pr = DAOScreenRect(pill);
+    if (CGRectEqualToRect(pr, CGRectZero)) return nil;
+    CGRect probe = CGRectInset(pr, -4, -4);
+    UIView *best = nil; CGFloat bestArea = 0;
+    for (UIView *dot in DAORecordingDots()) {
+        CGRect dr = DAOScreenRect(dot);
+        CGRect inter = CGRectIntersection(dr, probe);
+        if (CGRectIsNull(inter) || CGRectIsEmpty(inter)) continue;
+        CGFloat area = inter.size.width * inter.size.height;
+        if (area > bestArea) { bestArea = area; best = dot; }
+    }
+    return best;
+}
+
+static const void *kDotAlpha = &kDotAlpha;
+static NSMutableArray<UIView *> *gHiddenDots;
+
+// 压掉原生红点（记下原 alpha，可还原）
+static void DAOHideDot(UIView *dot) {
+    if (!dot || objc_getAssociatedObject(dot, kDotAlpha)) return;
+    objc_setAssociatedObject(dot, kDotAlpha, @(dot.alpha), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    dot.alpha = 0.0;
+    if (!gHiddenDots) gHiddenDots = [NSMutableArray array];
+    [gHiddenDots addObject:dot];
+}
+
+static void DAORestoreDots(void) {
+    for (UIView *d in gHiddenDots) {
+        NSNumber *a = objc_getAssociatedObject(d, kDotAlpha);
+        if (a) { d.alpha = a.doubleValue; objc_setAssociatedObject(d, kDotAlpha, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
+    }
+    [gHiddenDots removeAllObjects];
+}
+
 static BOOL DAOHasTag(UIView *pill, NSString *token, NSInteger depth) {
     if (!pill || depth < 0) return NO;
     NSString *ident = pill.accessibilityIdentifier;
@@ -834,20 +895,39 @@ static CGRect DAOSquare(CGPoint center, CGFloat side) {
     return CGRectMake(center.x - side / 2.0, center.y - side / 2.0, side, side);
 }
 
-// 左侧 = 写轮眼（录屏/左侧端点），右侧 = 跳舞（音乐/右侧端点）
-static BOOL DAOPlaceSide(BOOL left, CGRect pillRect, CGFloat sideFactor, CGFloat offset, CGFloat scale, CGFloat alpha) {
+// 左侧 = 写轮眼（录屏），右侧 = 跳舞（音乐）
+// 关键：左侧圆心优先跟随「系统录屏红点的实际位置」，而不是按岛两端推算 ——
+// 宽岛里红点不一定在左端点圆心，推算会偏到旁边（表现为素材蹦出来但没盖住红点）。
+static BOOL DAOPlaceSide(BOOL left, UIView *pill, CGRect pillRect,
+                         CGFloat sideFactor, CGFloat offset, CGFloat scale, CGFloat alpha) {
     CGFloat interval = DAODouble(@"islandgv_active_frame_interval", 0.1, 0.01, 0.2);
     CGFloat side = pillRect.size.height * sideFactor;
     side = MIN(side, pillRect.size.height) * MAX(0.4, scale);
     if (side < 8) { DAOHideSprite(left); return NO; }
 
     CGFloat radius = pillRect.size.height / 2.0;
-    CGFloat x = left ? (CGRectGetMinX(pillRect) + radius + offset)
-                     : (CGRectGetMaxX(pillRect) - radius - offset);
-    CGFloat y = CGRectGetMidY(pillRect);
-    x = MAX(CGRectGetMinX(pillRect) + side / 2.0 - radius * 0.5,
-            MIN(CGRectGetMaxX(pillRect) - side / 2.0 + radius * 0.5, x));
-    CGRect frame = DAOSquare(CGPointMake(x, y), side);
+    CGPoint center;
+    UIView *dot = left ? DAODotInPill(pill) : nil;
+    if (dot) {
+        // 红点：圆心直接用它的屏幕中心，最准
+        CGRect dr = DAOScreenRect(dot);
+        center = CGPointMake(CGRectGetMidX(dr) + offset, CGRectGetMidY(dr));
+        // 素材至少比红点大一点，才能完全盖住
+        CGFloat dotMax = MAX(dr.size.width, dr.size.height);
+        side = MAX(side, dotMax * 1.35);
+        DAOHideDot(dot);
+    } else {
+        CGFloat x = left ? (CGRectGetMinX(pillRect) + radius + offset)
+                         : (CGRectGetMaxX(pillRect) - radius - offset);
+        center = CGPointMake(x, CGRectGetMidY(pillRect));
+    }
+    // 夹在岛内，不允许整块跑出屏幕
+    CGFloat half = side / 2.0;
+    center.x = MAX(CGRectGetMinX(pillRect) + half - radius * 0.5,
+                   MIN(CGRectGetMaxX(pillRect) - half + radius * 0.5, center.x));
+    center.y = MAX(CGRectGetMinY(pillRect) + half - radius * 0.5,
+                   MIN(CGRectGetMaxY(pillRect) + half + radius * 0.5, center.y));
+    CGRect frame = DAOSquare(center, side);
 
     // 1) 选中的素材文件夹（mp4 / gif / png）优先
     NSString *mediaPath = DAOFolderMediaPath();
@@ -1016,6 +1096,7 @@ static void DAOScan(BOOL verbose) {
         if (gSpinView) { [gSpinView.layer removeAnimationForKey:@"dao.rot"]; gSpinView.hidden = YES; }
         if (gAperture) [gAperture applyRect:CGRectZero active:NO];
         DAORestoreArtwork();
+        DAORestoreDots();
         DAORestoreAll();
         return;
     }
@@ -1024,6 +1105,7 @@ static void DAOScan(BOOL verbose) {
         if (gSpinView) { [gSpinView.layer removeAnimationForKey:@"dao.rot"]; gSpinView.hidden = YES; }
         if (gAperture) [gAperture applyRect:CGRectZero active:NO];
         DAORestoreArtwork();
+        DAORestoreDots();
         DAORestoreAll();
         return;
     }
@@ -1049,8 +1131,13 @@ static void DAOScan(BOOL verbose) {
         CGFloat rSize = DAODouble(@"islandgv_active_right_size", 0.9, 0.6, 2.0);
         CGFloat lOff = DAODouble(@"islandgv_active_left_offset", 1.5, -10.0, 10.0);
         CGFloat rOff = DAODouble(@"islandgv_active_right_offset", 1.5, -10.0, 10.0);
-        if (leftOn) DAOPlaceSide(YES, pr, lSize, lOff, scale, alpha); else DAOHideSprite(YES);
-        if (rightOn) DAOPlaceSide(NO, pr, rSize, -rOff, scale, alpha); else DAOHideSprite(NO);
+        if (leftOn) {
+            DAOPlaceSide(YES, pill, pr, lSize, lOff, scale, alpha);
+        } else {
+            DAOHideSprite(YES);
+            DAORestoreDots();          // 关掉左侧动画就把原生红点还给系统
+        }
+        if (rightOn) DAOPlaceSide(NO, pill, pr, rSize, -rOff, scale, alpha); else DAOHideSprite(NO);
     } else {
         DAOHideSprite(YES); DAOHideSprite(NO);
     }
@@ -1068,8 +1155,20 @@ static void DAOScan(BOOL verbose) {
     @try { DAOPlaceSpin(pill); } @catch (...) {}
     @try { DAOAttachAperture(pill, expanded); } @catch (...) {}
 
-    if (verbose)
-        DAOLog(@"scan pill=%@ expanded=%d mode=%d", NSStringFromCGRect(pr), expanded, modeOn);
+    if (verbose) {
+        UIView *dbgDot = DAODotInPill(pill);
+        DAOLog(@"scan pill=%@ expanded=%d mode=%d dot=%@ eye=%@ dance=%@",
+               NSStringFromCGRect(pr), expanded, modeOn,
+               dbgDot ? NSStringFromCGRect(DAOScreenRect(dbgDot)) : @"none",
+               (gLeftSprite && !gLeftSprite.hidden) ? NSStringFromCGRect(gLeftSprite.frame) : @"-",
+               (gRightSprite && !gRightSprite.hidden) ? NSStringFromCGRect(gRightSprite.frame) : @"-");
+        for (UIView *d in DAORecordingDots())
+            DAOLog(@"  dot %@ %@ alpha=%.2f", NSStringFromClass(d.class),
+                   NSStringFromCGRect(DAOScreenRect(d)), d.alpha);
+        for (UIView *p in DAOPills())
+            DAOLog(@"  pill id=%@ %@", p.accessibilityIdentifier ?: @"-",
+                   NSStringFromCGRect(DAOScreenRect(p)));
+    }
 }
 
 #pragma mark - 扫描节流
@@ -1093,6 +1192,7 @@ static void DAOScanSoon(double delay, BOOL verbose) {
 
 static void DAOPurge(void) {
     DAOHideSprite(YES); DAOHideSprite(NO);
+    DAORestoreDots();
     if (gSpinView) { [gSpinView.layer removeAnimationForKey:@"dao.rot"]; gSpinView.hidden = YES; }
     if (gAperture) [gAperture applyRect:CGRectZero active:NO];
     DAORestoreArtwork();
@@ -1144,7 +1244,10 @@ static void DAOObserve(void) {
                                                   usingBlock:^(__unused NSNotification *n) {
         DAOLog(@"capture -> %d", [UIScreen mainScreen].isCaptured);
         DAOScanSoon(0.08, YES);
-        DAOScanSoon(0.42, NO);
+        DAOScanSoon(0.20, NO);
+        DAOScanSoon(0.35, NO);
+        DAOScanSoon(0.60, NO);
+        DAOScanSoon(0.95, NO);
     }];
     for (NSString *name in @[ @"kMRMediaRemoteNowPlayingInfoDidChangeNotification",
                               @"_MRMediaRemoteNowPlayingInfoDidChange",
@@ -1188,7 +1291,7 @@ static void DAOApplyNow(void) {
 
 static void DAOApplySettings(void) {
     NSInteger t = ++gApplyTicket;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.28 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         if (t != gApplyTicket) return;
         @try { DAOApplyNow(); } @catch (...) {}
