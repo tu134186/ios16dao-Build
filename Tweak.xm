@@ -15,7 +15,7 @@
 #import <math.h>
 #import <stdio.h>
 
-static NSString *const DAOVersion  = @"1.3.1";
+static NSString *const DAOVersion  = @"1.4.0";
 static const char *const DAONotify = "com.minis.ios16dao/changed";
 static NSString *const DAORoot     = @"/var/mobile/ios16dao";
 static NSString *const DAOLogPath  = @"/var/mobile/ios16dao.log";
@@ -239,7 +239,15 @@ static NSString *DAOFolderMediaPath(void) {
 - (void)play:(NSArray<UIImage *> *)frames interval:(CGFloat)interval {
     if (frames.count == 0) return;
     CGFloat d = MAX(0.01, interval) * frames.count;
-    if (self.animationImages == frames && fabs(self.animationDuration - d) < 0.004) {
+    if (self.animationImages == frames) {
+        // 素材没换，只有速度变了 → 原地改 duration，不重启动画
+        if (fabs(self.animationDuration - d) > 0.001) {
+            BOOL running = self.isAnimating;
+            if (running) [self stopAnimating];
+            self.animationDuration = d;
+            if (running) [self startAnimating];   // 立刻按新速度继续
+            return;
+        }
         if (!self.isAnimating) [self startAnimating];
         return;
     }
@@ -250,8 +258,8 @@ static NSString *DAOFolderMediaPath(void) {
     [self startAnimating];
 }
 - (void)halt {
+    // 只停不销毁：留着重播时不用重新解包 24 张图，避免闪烁与卡顿
     [self stopAnimating];
-    self.animationImages = nil;
 }
 @end
 
@@ -665,17 +673,41 @@ static void DAORestoreDots(void) {
 //   element-identifier:systemApertureElementIdentifierScreenRecording
 // 所以必须逐个容器按自己的 identifier 分类 —— 不能「取最宽的那个」，
 // 因为录屏和时钟/音乐可以同时各有一个容器（日志 817219872.6 就是这样）。
-static UIView *DAOPillForElement(NSString *token) {
-    UIView *best = nil;
+static UIView *DAOPillForElement(NSString *token, BOOL *found) {
+    if (found) *found = NO;
+    UIView *best = nil; CGRect bestRect = CGRectZero;
     for (UIView *p in DAOPills()) {
         NSString *ident = p.accessibilityIdentifier;
-        if (![ident isKindOfClass:[NSString class]] || ident.length == 0) continue;
-        if ([ident containsString:@"axsContainer"]) continue;      // 自己创建的容器
-        if (![ident containsString:token]) continue;
-        // 同一种元素可能有多个副本，取屏幕面积最大的（真正显示的那个）
-        if (!best) { best = p; continue; }
-        CGRect a = DAOScreenRect(best), b = DAOScreenRect(p);
-        if (b.size.width * b.size.height > a.size.width * a.size.height) best = p;
+        if ([ident isKindOfClass:[NSString class]] && [ident containsString:@"axsContainer"]) continue;
+        BOOL hit = NO;
+        if ([ident isKindOfClass:[NSString class]] && ident.length &&
+            [ident containsString:token]) hit = YES;
+        if (!hit && DAOHasTag(p, token, 6)) hit = YES;
+        if (!hit) continue;
+        if (found) *found = YES;
+        CGRect r = DAOScreenRect(p);
+        if (!best || r.size.width * r.size.height < bestRect.size.width * bestRect.size.height) {
+            // 同种元素有多个副本时取「最小」的：真正的紧凑岛，而不是被放大的 morph 态
+            best = p; bestRect = r;
+        }
+    }
+    return best;
+}
+
+// 音乐岛：系统在音乐播放时容器 identifier 里并没有 "NowPlaying"（实测日志只有
+// jindo-container-view:N），所以改用「容器内存在方形封面图」来判定，
+// 这也正好对应原版 IOS16DAOActiveAlbumView 的 artworkView。
+static UIView *DAOPillWithArtwork(UIView *exclude) {
+    UIView *best = nil; CGFloat bestScore = -1;
+    for (UIView *p in DAOPills()) {
+        if (exclude && p == exclude) continue;
+        NSString *ident = p.accessibilityIdentifier;
+        if ([ident isKindOfClass:[NSString class]] &&
+            ([ident containsString:@"axsContainer"] || [ident containsString:@"ScreenRecording"])) continue;
+        CGRect vis = CGRectZero;
+        if (!DAOArtworkInPill(p, &vis)) continue;
+        CGFloat score = vis.size.width * vis.size.height;
+        if (score > bestScore) { bestScore = score; best = p; }
     }
     return best;
 }
@@ -712,7 +744,12 @@ static const void *kDAOAlpha = &kDAOAlpha;
 static NSMutableArray<UIView *> *gHiddenViews;
 
 static void DAOHideView(UIView *v) {
-    if (!v || objc_getAssociatedObject(v, kDAOAlpha)) return;
+    if (!v) return;
+    if (objc_getAssociatedObject(v, kDAOAlpha)) {
+        // 已经被压过：系统可能又把 alpha 改回来（背板重建），重新压一次
+        if (v.alpha > 0.01) v.alpha = 0.0;
+        return;
+    }
     objc_setAssociatedObject(v, kDAOAlpha, @(v.alpha), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     v.alpha = 0.0;
     if (!gHiddenViews) gHiddenViews = [NSMutableArray array];
@@ -801,8 +838,8 @@ static DAOMediaView *DAOMedia(BOOL left) {
 static void DAOHideSprite(BOOL left) {
     __strong DAOSpriteView **s = left ? &gLeftSprite : &gRightSprite;
     __strong DAOMediaView **m = left ? &gLeftMedia : &gRightMedia;
-    if (*s) { [(*s) halt]; (*s).hidden = YES; (*s).frame = CGRectZero; }
-    if (*m) { [(*m) halt]; (*m).hidden = YES; (*m).frame = CGRectZero; }
+    if (*s) { [(*s) halt]; (*s).hidden = YES; }
+    if (*m) { [(*m) halt]; (*m).hidden = YES; }
 }
 
 static CGRect DAOSquare(CGPoint center, CGFloat side) {
@@ -927,7 +964,26 @@ static BOOL DAOPlaceSide(BOOL left, UIView *pill, CGRect pillRect,
     DAOSpriteView *sp = DAOSprite(left);
     if (!sp) return NO;
     DAOReparent(sp, pill);
-    sp.frame = frame;
+    if (!CGRectEqualToRect(sp.frame, frame)) {
+        CGFloat dw = fabs(sp.frame.size.width - frame.size.width);
+        CGFloat dy = fabs(CGRectGetMidY(sp.frame) - CGRectGetMidY(frame));
+        BOOL bigJump = (dw > 8.0 || dy > 8.0);
+        if (sp.hidden || bigJump) {
+            // 首次出现 / 尺寸突变：直接落位（免得看到从旧位置滑过来）
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            sp.frame = frame;
+            [CATransaction commit];
+        } else {
+            // 小范围跟随岛形变：短动画过渡，视觉上跟手
+            [UIView animateWithDuration:0.16
+                                  delay:0
+                                options:UIViewAnimationOptionBeginFromCurrentState |
+                                        UIViewAnimationOptionCurveEaseOut |
+                                        UIViewAnimationOptionAllowUserInteraction
+                             animations:^{ sp.frame = frame; }];
+        }
+    }
     sp.hidden = NO;
     sp.alpha = alpha;
     [sp play:frames interval:interval];
@@ -1097,10 +1153,20 @@ static BOOL DAORefreshGeometryOnly(UIView *pill, CGRect pr, BOOL modeOn, BOOL ex
         CGFloat x = left ? off : (pb.size.width - side - off);
         CGRect f = CGRectMake(x, (h - side) / 2.0, side, side);
         if (!CGRectEqualToRect(sp.frame, f)) {
-            [CATransaction begin];
-            [CATransaction setDisableActions:YES];
-            sp.frame = f;
-            [CATransaction commit];
+            CGFloat dw = fabs(sp.frame.size.width - f.size.width);
+            CGFloat dy = fabs(CGRectGetMidY(sp.frame) - CGRectGetMidY(f));
+            if (dw > 8.0 || dy > 8.0) {
+                [CATransaction begin];
+                [CATransaction setDisableActions:YES];
+                sp.frame = f;
+                [CATransaction commit];
+            } else {
+                [UIView animateWithDuration:0.16 delay:0
+                                    options:UIViewAnimationOptionBeginFromCurrentState |
+                                            UIViewAnimationOptionCurveEaseOut |
+                                            UIViewAnimationOptionAllowUserInteraction
+                                 animations:^{ sp.frame = f; }];
+            }
         }
         sp.alpha = alpha;
     }
@@ -1122,13 +1188,26 @@ static void DAOScan(BOOL verbose) {
     // ── 关键：按元素各自找容器 ─────────────────────────────────
     // 日志证据（817219872.6）：录屏容器 36.66pt 在 x=285，时钟容器 163pt 在 x=114，
     // 同时存在。以前我「取最宽」→ 素材被塞进时钟容器，位置当然全错。
-    UIView *recPill   = DAOPillForElement(@"ScreenRecording");
-    UIView *musicPill = DAOPillForElement(@"NowPlaying");
+    BOOL captured = [UIScreen mainScreen].isCaptured;
 
-    // 兜底：只有一个容器且确实在录屏（有些系统版本 identifier 还没生成）
-    if (!recPill && [UIScreen mainScreen].isCaptured && !musicPill) {
+    // 录屏容器：identifier 命中还不够 —— 日志 817253973.7 证明「录屏已结束」时
+    // 容器的 ScreenRecording 标识会残留（展开成 407x84 的 morph 态），
+    // 所以必须以 isCaptured 为硬门控，否则结束录屏后左边素材还挂着。
+    UIView *recPill = captured ? DAOPillForElement(@"ScreenRecording", NULL) : nil;
+    if (recPill) {
+        CGRect rr = DAOScreenRect(recPill);
+        if (rr.size.width > rr.size.height * 2.6) recPill = nil;  // morph 中间态，不算
+    }
+    if (!recPill && captured) {
         BOOL exp = NO; UIView *only = DAOMainPill(&exp);
         if (only && DAOPills().count == 1) recPill = only;
+    }
+
+    // 音乐岛：靠封面图判定，不看 identifier
+    UIView *musicPill = DAOPillWithArtwork(recPill);
+    if (musicPill) {
+        CGRect mr = DAOScreenRect(musicPill);
+        if (mr.size.width > mr.size.height * 2.6) musicPill = nil;
     }
 
     UIView *hostPill = recPill ?: musicPill;
@@ -1151,8 +1230,6 @@ static void DAOScan(BOOL verbose) {
         @try { DAOAttachAperture(hostPill, expanded); } @catch (...) {}
         return;
     }
-
-    BOOL captured = [UIScreen mainScreen].isCaptured;
 
     // 左侧（写轮眼）：只挂到录屏容器
     BOOL leftOn = modeOn && DAOBool(@"islandgv_active_custom_album", NO) && (recPill != nil);
@@ -1327,10 +1404,45 @@ static void DAOObserve(void) {
 static NSInteger gApplyTicket = 0;
 
 static void DAOApplyNow(void) {
+    CGFloat newEdge = DAODouble(@"islandgv_active_decode_max_edge", 220.0, 160.0, 320.0);
+    NSString *newFolder = DAOSelectedFolder() ?: @"";
+    static CGFloat sLastEdge = -1;
+    static NSString *sLastFolder;
+    BOOL mediaChanged = (fabs(newEdge - sLastEdge) > 0.5) ||
+                        ![newFolder isEqualToString:(sLastFolder ?: @"")];
+    sLastEdge = newEdge;
+    sLastFolder = newFolder;
     DAOFlush();
-    DAOClearMediaCache();
-    gMediaPathLeft = nil; gMediaPathRight = nil;
-    DAOLog(@"settings changed");
+    if (mediaChanged) {
+        DAOClearMediaCache();
+        gMediaPathLeft = nil; gMediaPathRight = nil;
+    }
+    DAOLog(@"settings changed (mediaChanged=%d) | 总:%d 小岛:%d 录屏隐藏:%d 禁阴影:%d 省电:%d "
+           "左:%d(%.2f,%+.1f) 右:%d(%.2f,%+.1f) 蒙版:%d 速度:%.2fs 清晰度:%.0f 透明度:%.2f 比例:%.2f "
+           "光圈:%d 常驻:%d 粗:%.1f 样式:%d 色:%@ 阴影:%d 粒子:%d/%d 屏蔽:%lu",
+           mediaChanged,
+           DAOExpandedOn(), DAOPillOn(),
+           DAOBool(@"islandgv_dnl_enabled", NO), DAOBool(@"islandgv_dnl_shadow_disabled", NO),
+           DAOPowerSaving(),
+           DAOBool(@"islandgv_active_custom_album", NO),
+           DAODouble(@"islandgv_active_left_size", 0.9, 0.6, 2.0),
+           DAODouble(@"islandgv_active_left_offset", 1.5, -10.0, 10.0),
+           DAOBool(@"islandgv_active_custom_dance", NO),
+           DAODouble(@"islandgv_active_right_size", 0.9, 0.6, 2.0),
+           DAODouble(@"islandgv_active_right_offset", 1.5, -10.0, 10.0),
+           DAOBool(@"islandgv_active_enable_mask", YES),
+           DAODouble(@"islandgv_active_frame_interval", 0.1, 0.01, 0.2),
+           DAODouble(@"islandgv_active_decode_max_edge", 220.0, 160.0, 320.0),
+           DAODouble(@"islandgv_alpha", 1.0, 0.0, 1.0),
+           DAODouble(@"islandgv_scale", 1.0, 0.5, 1.5),
+           DAOBool(@"aperture_enabled", NO), DAOBool(@"aperture_permanent", NO),
+           DAODouble(@"aperture_thickness", 3.5, 1.0, 10.0),
+           (int)DAODouble(@"aperture_style", 0, 0, 4),
+           DAOString(@"aperture_color") ?: @"(默认)",
+           DAOBool(@"aperture_shadow_style", NO),
+           DAOBool(@"aperture_particle_enabled", NO),
+           (int)DAODouble(@"aperture_particle_style", 0, 0, 3),
+           (unsigned long)(DAOArray(@"islandgv_excluded_apps").count));
     @try { DAOPurge(); } @catch (...) {}
     DAOScan(NO);
 }
