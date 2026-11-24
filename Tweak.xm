@@ -920,6 +920,9 @@ static BOOL DAOPlaceSide(BOOL left, UIView *pill, CGRect pillRect,
     CGFloat x = left ? offset : (W - side - offset);
     CGFloat y = (H - side) / 2.0;
     CGRect frame = CGRectMake(x, y, side, side);
+
+    // 帧间隔：原版 islandgv_active_frame_interval（0.01~0.2s，是「每帧时长」不是 fps）
+    CGFloat interval = DAODouble(@"islandgv_active_frame_interval", 0.1, 0.01, 0.2);
     // ────────────────────────────────────────────────────────────
 
     // 1) 选中的素材文件夹（mp4 / gif / png）优先
