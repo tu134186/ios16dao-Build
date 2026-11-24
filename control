@@ -1,0 +1,9 @@
+Package: com.minis.ios16dao
+Name: 动态岛
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: 灵动岛素材替换（ios16dao 功能复刻）：展开态/小岛态自定义逐帧动画（写轮眼、跳舞）、专辑封面旋转蒙版、灵动光圈（5 种样式 + 4 种粒子特效 + 发光阴影）、录屏隐藏原生岛、去除岛阴影材质、应用屏蔽、省电模式、透明度和比例调节。全自研，无设备指纹、无激活码、无任何联网代码。
+Maintainer: Minis
+Author: Minis
+Section: Tweaks
+Depends: firmware (>= 15.0), mobilesubstrate, preferenceloader

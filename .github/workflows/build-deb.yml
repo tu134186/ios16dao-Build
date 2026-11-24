@@ -1,0 +1,115 @@
+name: Build ios16dao DEB
+on:
+  workflow_dispatch:
+  push:
+    branches: ['**']
+permissions:
+  contents: write
+concurrency:
+  group: ios16dao-build
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate source and package source zip
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import plistlib, zipfile, os
+          root = Path('.')
+          version = next(s.split(':',1)[1].strip() for s in Path('control').read_text().splitlines() if s.startswith('Version:'))
+          assert version == Path('VERSION.txt').read_text().strip(), 'VERSION mismatch'
+          for name in ['ios16dao.plist', 'Makefile', 'Tweak.xm', 'control']:
+              assert Path(name).is_file(), name
+          assert plistlib.loads(Path('ios16dao.plist').read_bytes())['Filter']['Bundles'] == ['com.apple.springboard']
+          for p in root.rglob('*.plist'):
+              if '.git' not in p.parts:
+                  plistlib.loads(p.read_bytes())
+          for name in ['ios16daoPrefs']:
+              info = plistlib.loads((root/name/'Resources/Info.plist').read_bytes())
+              assert info['CFBundleVersion'] == version, 'bundle version mismatch'
+              assert info['CFBundleShortVersionString'] == version
+          # 源码里不得出现任何联网 / 许可证逻辑
+          src = Path('Tweak.xm').read_text()
+          for bad in ['NSURLSession','NSURLConnection','MGCopyAnswer','CCCrypt','CFNetwork','socket(','getaddrinfo','http://','https://']:
+              assert bad not in src, f'forbidden token in Tweak.xm: {bad}'
+          for p in ['ios16daoSettings/DAOListController.m','ios16daoSettings/DAOAdjustCell.m','ios16daoSettings/DAOAppListController.m']:
+              t = Path(p).read_text()
+              for bad in ['NSURLSession','MGCopyAnswer','CCCrypt','activation']:
+                  assert bad not in t, f'forbidden token {bad} in {p}'
+          out = Path('_delivery'); out.mkdir()
+          with zipfile.ZipFile(out/(version+'-ios16dao-source.zip'), 'w', zipfile.ZIP_DEFLATED) as z:
+              for p in sorted(root.rglob('*')):
+                  if p.is_file() and not any(x in p.parts for x in ('.git','.theos','packages','_delivery')) and p.suffix != '.zip':
+                      z.write(p, p.as_posix())
+          with open(os.environ['GITHUB_ENV'], 'a') as f:
+              f.write('DELIVERY_VERSION='+version+'\n')
+          PY
+
+      - name: Install build dependencies
+        run: |
+          git clone --recursive --depth 1 https://github.com/theos/theos.git "$HOME/theos"
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+          brew install ldid xz dpkg
+          if ! find "$HOME/theos/sdks" -maxdepth 1 -name '*.sdk' -type d | grep -q .; then
+            git clone --depth 1 https://github.com/theos/sdks.git "$RUNNER_TEMP/theos-sdks"
+            cp -R "$RUNNER_TEMP/theos-sdks/"*.sdk "$HOME/theos/sdks/"
+          fi
+
+      - name: Compile integrated DEB
+        run: |
+          set -o pipefail
+          make clean package FINALPACKAGE=1 2>&1 | tee build-output.log
+
+      - name: Verify packaged modules
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess, plistlib, shutil, hashlib, os
+          packages = list(Path('packages').glob('*.deb'))
+          assert len(packages) == 1, packages
+          deb = packages[0]
+          assert subprocess.check_output(['dpkg-deb','-f',str(deb),'Version'], text=True).strip() == os.environ['DELIVERY_VERSION']
+          dest = Path('_unpacked')
+          subprocess.run(['dpkg-deb','-x',str(deb),str(dest)], check=True)
+          assert len(list(dest.rglob('ios16dao.dylib'))) == 1
+          bundles = list(dest.rglob('ios16daoPrefs.bundle'))
+          assert len(bundles) == 1, bundles
+          info = plistlib.loads((bundles[0]/'Info.plist').read_bytes())
+          assert info['CFBundleVersion'] == os.environ['DELIVERY_VERSION']
+          assert (bundles[0]/info['CFBundleExecutable']).is_file()
+          linked = subprocess.check_output(['otool','-L',str(next(dest.rglob('ios16dao.dylib')))], text=True)
+          out = Path('_delivery')
+          shutil.copy2(deb, out/(os.environ['DELIVERY_VERSION']+'-ios16dao.deb'))
+          (out/'BUILD-VERIFICATION.txt').write_text(
+              'Clean-room reimplementation of the ios16dao island tweak feature set. No license activation, no device fingerprint, no network access.\n'+linked)
+          files = sorted(out.iterdir())
+          (out/'SHA256SUMS.txt').write_text(''.join(hashlib.sha256(p.read_bytes()).hexdigest()+'  '+p.name+'\n' for p in files))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios16dao-${{ env.DELIVERY_VERSION }}
+          path: _delivery/*
+          if-no-files-found: error
+
+      - name: Publish direct downloads
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "delivery-${DELIVERY_VERSION}-${GITHUB_RUN_ID}" _delivery/* \
+            --target "$GITHUB_SHA" \
+            --title "ios16dao ${DELIVERY_VERSION}" \
+            --notes "Clean-room dynamic island dance tweak. Run ${GITHUB_RUN_ID}; commit ${GITHUB_SHA}."
+
+      - name: Upload failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios16dao-${{ env.DELIVERY_VERSION }}-build-logs
+          path: build-output.log
+          if-no-files-found: warn
