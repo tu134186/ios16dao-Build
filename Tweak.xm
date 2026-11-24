@@ -11,6 +11,7 @@
 #import <ImageIO/ImageIO.h>
 #import <notify.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 #import <math.h>
 #import <stdio.h>
 
@@ -216,7 +217,9 @@ static NSString *DAOFolderMediaPath(void) {
     if (!files.count) return nil;
     NSString *folder = DAOSelectedFolder();
     return [[DAORootDir() stringByAppendingPathComponent:folder] stringByAppendingPathComponent:files.firstObject];
-}#pragma mark - 覆盖层
+}
+
+#pragma mark - 覆盖层
 
 static UIWindow *gOverlay;
 static UIView *gStage;
@@ -401,7 +404,9 @@ static NSArray<UIImage *> *DAOGIFFrames(NSString *path) {
     }
     CFRelease(src);
     return out;
-}#pragma mark - 灵动光圈
+}
+
+#pragma mark - 灵动光圈
 
 static UIColor *DAOColorFromHex(NSString *hex, UIColor *fallback) {
     if (!hex.length) return fallback;
@@ -717,7 +722,9 @@ static UIView *DAOMainPill(BOOL *expandedOut) {
     if (!expanded && compact) chosen = compact;
     if (expandedOut) *expandedOut = expanded;
     return chosen;
-}#pragma mark - 原生元件隐藏 / 还原
+}
+
+#pragma mark - 原生元件隐藏 / 还原
 
 static const void *kDAOAlpha = &kDAOAlpha;
 static NSMutableArray<UIView *> *gHiddenViews;
@@ -1059,7 +1066,9 @@ static void DAOScan(BOOL verbose) {
 
     if (verbose)
         DAOLog(@"scan pill=%@ expanded=%d mode=%d", NSStringFromCGRect(pr), expanded, modeOn);
-}#pragma mark - 扫描节流
+}
+
+#pragma mark - 扫描节流
 
 static NSTimeInterval gLastScan = -1e9;
 static BOOL gScanQueued = NO;
