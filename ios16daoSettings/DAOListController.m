@@ -4,6 +4,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <spawn.h>
 #import <stdlib.h>
+#import <string.h>
 
 static NSString *const kDomain = @"com.minis.ios16dao";
 static CFStringRef const kNotify = CFSTR("com.minis.ios16dao/changed");
@@ -226,8 +227,11 @@ static NSArray<NSString *> *DAOFolders(void) {
         for (NSString *path in @[@"/var/jb/usr/bin/killall", @"/usr/bin/killall", @"/usr/bin/killall9"]) {
             if (![[NSFileManager defaultManager] fileExistsAtPath:path]) continue;
             pid_t pid = 0;
-            char *argv[] = { (char *)path, (char *)"SpringBoard", NULL };
-            posix_spawn(&pid, path.UTF8String, NULL, NULL, argv, NULL);
+            char exe[256];
+            strncpy(exe, path.UTF8String, sizeof(exe) - 1);
+            exe[sizeof(exe) - 1] = '\0';
+            char *argv[] = { exe, (char *)"SpringBoard", NULL };
+            posix_spawn(&pid, exe, NULL, NULL, argv, NULL);
             return;
         }
         UIAlertController *fail = [UIAlertController alertControllerWithTitle:@"重启可能失败"
