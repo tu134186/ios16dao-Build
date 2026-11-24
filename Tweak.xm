@@ -15,7 +15,7 @@
 #import <math.h>
 #import <stdio.h>
 
-static NSString *const DAOVersion  = @"1.0.0";
+static NSString *const DAOVersion  = @"1.3.1";
 static const char *const DAONotify = "com.minis.ios16dao/changed";
 static NSString *const DAORoot     = @"/var/mobile/ios16dao";
 static NSString *const DAOLogPath  = @"/var/mobile/ios16dao.log";
@@ -649,46 +649,6 @@ static NSArray<UIView *> *DAOPills(void) {
     return out;
 }
 
-// 录屏红点：SBRecordingIndicatorView / Window 里的那个小圆点（1.5~26pt）
-static NSArray<UIView *> *DAORecordingDots(void) {
-    NSMutableArray<UIView *> *out = [NSMutableArray array];
-    NSMutableArray<UIView *> *stack = [NSMutableArray array];
-    for (UIWindow *w in DAOAllWindows()) {
-        [stack addObject:w];
-    }
-    while (stack.count) {
-        UIView *v = stack.lastObject; [stack removeLastObject];
-        NSString *cn = NSStringFromClass(v.class);
-        if ([cn containsString:@"RecordingIndicator"]) {
-            CGSize b = v.bounds.size;
-            CGFloat m = MAX(b.width, b.height);
-            CGFloat n = MIN(b.width, b.height);
-            if (m >= 1.5 && m <= 30.0 && n >= 1.0 && v.window && !v.hidden) {
-                CGRect r = DAOScreenRect(v);
-                if (DAOOnScreen(r)) [out addObject:v];
-            }
-        }
-        for (UIView *s in v.subviews) [stack addObject:s];
-    }
-    return out;
-}
-
-// 选出属于这块岛的红点：屏幕矩形与岛矩形相交（±4pt 容差）
-static UIView *DAODotInPill(UIView *pill) {
-    CGRect pr = DAOScreenRect(pill);
-    if (CGRectEqualToRect(pr, CGRectZero)) return nil;
-    CGRect probe = CGRectInset(pr, -4, -4);
-    UIView *best = nil; CGFloat bestArea = 0;
-    for (UIView *dot in DAORecordingDots()) {
-        CGRect dr = DAOScreenRect(dot);
-        CGRect inter = CGRectIntersection(dr, probe);
-        if (CGRectIsNull(inter) || CGRectIsEmpty(inter)) continue;
-        CGFloat area = inter.size.width * inter.size.height;
-        if (area > bestArea) { bestArea = area; best = dot; }
-    }
-    return best;
-}
-
 static const void *kDotAlpha = &kDotAlpha;
 static NSMutableArray<UIView *> *gHiddenDots;
 
@@ -698,6 +658,26 @@ static void DAORestoreDots(void) {
         if (a) { d.alpha = a.doubleValue; objc_setAssociatedObject(d, kDotAlpha, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
     }
     [gHiddenDots removeAllObjects];
+}
+
+// 容器的 accessibilityIdentifier 是组合串，实测格式：
+//   jindo-container-view:1,client-identifier:com.apple.replaykitangel,
+//   element-identifier:systemApertureElementIdentifierScreenRecording
+// 所以必须逐个容器按自己的 identifier 分类 —— 不能「取最宽的那个」，
+// 因为录屏和时钟/音乐可以同时各有一个容器（日志 817219872.6 就是这样）。
+static UIView *DAOPillForElement(NSString *token) {
+    UIView *best = nil;
+    for (UIView *p in DAOPills()) {
+        NSString *ident = p.accessibilityIdentifier;
+        if (![ident isKindOfClass:[NSString class]] || ident.length == 0) continue;
+        if ([ident containsString:@"axsContainer"]) continue;      // 自己创建的容器
+        if (![ident containsString:token]) continue;
+        // 同一种元素可能有多个副本，取屏幕面积最大的（真正显示的那个）
+        if (!best) { best = p; continue; }
+        CGRect a = DAOScreenRect(best), b = DAOScreenRect(p);
+        if (b.size.width * b.size.height > a.size.width * a.size.height) best = p;
+    }
+    return best;
 }
 
 static BOOL DAOHasTag(UIView *pill, NSString *token, NSInteger depth) {
@@ -1128,111 +1108,95 @@ static BOOL DAORefreshGeometryOnly(UIView *pill, CGRect pr, BOOL modeOn, BOOL ex
 }
 
 static void DAOScan(BOOL verbose) {
-    if (!DAOAnyOn() && !DAOBool(@"aperture_enabled", NO)) {
-        DAOHideSprite(YES); DAOHideSprite(NO);
-        if (gSpinView) { [gSpinView.layer removeAnimationForKey:@"dao.rot"]; gSpinView.hidden = YES; }
-        if (gAperture) [gAperture applyRect:CGRectZero active:NO];
-        DAORestoreArtwork();
-        DAORestoreDots();
-        DAORestoreAll();
-        return;
+    // 统一清理路径
+    #define DAO_CLEAR_ALL() do { \
+        DAOHideSprite(YES); DAOHideSprite(NO); \
+        if (gSpinView) { [gSpinView.layer removeAnimationForKey:@"dao.rot"]; gSpinView.hidden = YES; } \
+        if (gAperture) [gAperture applyRect:CGRectZero active:NO]; \
+        DAORestoreArtwork(); DAORestoreDots(); DAORestoreAll(); \
+    } while (0)
+
+    if (!DAOAnyOn() && !DAOBool(@"aperture_enabled", NO)) { DAO_CLEAR_ALL(); return; }
+    if (DAOAppExcluded()) { DAO_CLEAR_ALL(); return; }
+
+    // ── 关键：按元素各自找容器 ─────────────────────────────────
+    // 日志证据（817219872.6）：录屏容器 36.66pt 在 x=285，时钟容器 163pt 在 x=114，
+    // 同时存在。以前我「取最宽」→ 素材被塞进时钟容器，位置当然全错。
+    UIView *recPill   = DAOPillForElement(@"ScreenRecording");
+    UIView *musicPill = DAOPillForElement(@"NowPlaying");
+
+    // 兜底：只有一个容器且确实在录屏（有些系统版本 identifier 还没生成）
+    if (!recPill && [UIScreen mainScreen].isCaptured && !musicPill) {
+        BOOL exp = NO; UIView *only = DAOMainPill(&exp);
+        if (only && DAOPills().count == 1) recPill = only;
     }
-    if (DAOAppExcluded()) {
-        DAOHideSprite(YES); DAOHideSprite(NO);
-        if (gSpinView) { [gSpinView.layer removeAnimationForKey:@"dao.rot"]; gSpinView.hidden = YES; }
-        if (gAperture) [gAperture applyRect:CGRectZero active:NO];
-        DAORestoreArtwork();
-        DAORestoreDots();
-        DAORestoreAll();
-        return;
-    }
+
+    UIView *hostPill = recPill ?: musicPill;
+    if (!hostPill) { DAO_CLEAR_ALL(); return; }
 
     BOOL expanded = NO;
-    UIView *pill = DAOMainPill(&expanded);
-    if (!pill) {
-        DAOHideSprite(YES); DAOHideSprite(NO);
-        if (gSpinView) { [gSpinView.layer removeAnimationForKey:@"dao.rot"]; gSpinView.hidden = YES; }
-        if (gAperture) [gAperture applyRect:CGRectZero active:NO];
-        DAORestoreAll();
-        return;
-    }
-    CGRect pr = DAOScreenRect(pill);
+    { CGRect r = DAOScreenRect(hostPill); expanded = (r.size.width > r.size.height * 2.0); }
     CGFloat alpha = DAODouble(@"islandgv_alpha", 1.0, 0.0, 1.0);
     CGFloat scale = DAODouble(@"islandgv_scale", 1.0, 0.5, 1.5);
-
     BOOL modeOn = expanded ? DAOExpandedOn() : DAOPillOn();
 
-    // 快速路径：配置没变 → 只更新几何，绝不重建视图（对齐原版 0x16694 变更门控）
-    BOOL changed = DAOConfigChanged();
-    if (!changed && modeOn) {
-        BOOL fast = DAORefreshGeometryOnly(pill, pr, modeOn, expanded);
-        if (fast) {
-            // 录屏压背板 / 光圈仍需每帧维护（它们不涉及视图重建）
-            BOOL capturedNow = [UIScreen mainScreen].isCaptured;
-            if (DAOBool(@"islandgv_dnl_enabled", NO) && capturedNow) DAOHideBackdropIn(pill, YES);
-            @try { DAOAttachAperture(pill, expanded); } @catch (...) {}
-            return;
-        }
+    // 变更门控：配置没变 → 只更新几何，不重建（原版 0x16694，阈值 1e-4）
+    if (modeOn && !DAOConfigChanged()) {
+        if (recPill && DAOBool(@"islandgv_active_custom_album", NO))
+            DAORefreshGeometryOnly(recPill, DAOScreenRect(recPill), YES, expanded);
+        if (musicPill && DAOBool(@"islandgv_active_custom_dance", NO))
+            DAORefreshGeometryOnly(musicPill, DAOScreenRect(musicPill), YES, expanded);
+        if (DAOBool(@"islandgv_dnl_enabled", NO) && [UIScreen mainScreen].isCaptured)
+            DAOHideBackdropIn(recPill, YES);
+        @try { DAOAttachAperture(hostPill, expanded); } @catch (...) {}
+        return;
     }
 
-    // 门控：左侧只在「正在录屏」或岛里确实有录屏元素时出现；
-    // 右侧只在岛里确实有正在播放的音乐元素时出现。
-    // 原版靠 SAUIElementView 的生命周期驱动，不会在空岛/滑动 App 时乱冒。
     BOOL captured = [UIScreen mainScreen].isCaptured;
-    BOOL hasRecording = captured || DAOHasTag(pill, @"ScreenRecording", 5) || DAODotInPill(pill) != nil;
-    BOOL hasNowPlaying = DAOHasTag(pill, @"NowPlaying", 5);
 
-    if (modeOn) {
-        BOOL leftOn = DAOBool(@"islandgv_active_custom_album", NO) && hasRecording;
-        BOOL rightOn = DAOBool(@"islandgv_active_custom_dance", NO) && hasNowPlaying;
+    // 左侧（写轮眼）：只挂到录屏容器
+    BOOL leftOn = modeOn && DAOBool(@"islandgv_active_custom_album", NO) && (recPill != nil);
+    if (leftOn) {
         CGFloat lSize = DAODouble(@"islandgv_active_left_size", 0.9, 0.6, 2.0);
+        CGFloat lOff  = DAODouble(@"islandgv_active_left_offset", 1.5, -10.0, 10.0);
+        DAOPlaceSide(YES, recPill, DAOScreenRect(recPill), lSize, lOff, scale, alpha);
+    } else {
+        DAOHideSprite(YES);
+    }
+
+    // 右侧（跳舞）：只挂到音乐容器
+    BOOL rightOn = modeOn && DAOBool(@"islandgv_active_custom_dance", NO) && (musicPill != nil);
+    if (rightOn) {
         CGFloat rSize = DAODouble(@"islandgv_active_right_size", 0.9, 0.6, 2.0);
-        CGFloat lOff = DAODouble(@"islandgv_active_left_offset", 1.5, -10.0, 10.0);
-        CGFloat rOff = DAODouble(@"islandgv_active_right_offset", 1.5, -10.0, 10.0);
-        if (leftOn) {
-            DAOPlaceSide(YES, pill, pr, lSize, lOff, scale, alpha);
-        } else {
-            DAOHideSprite(YES);
-            DAORestoreDots();          // 关掉左侧动画就把原生红点还给系统
-        }
-        if (rightOn) DAOPlaceSide(NO, pill, pr, rSize, rOff, scale, alpha); else DAOHideSprite(NO);
+        CGFloat rOff  = DAODouble(@"islandgv_active_right_offset", 1.5, -10.0, 10.0);
+        DAOPlaceSide(NO, musicPill, DAOScreenRect(musicPill), rSize, rOff, scale, alpha);
     } else {
-        DAOHideSprite(YES); DAOHideSprite(NO);
+        DAOHideSprite(NO);
     }
 
-    // 录屏隐藏原生岛：只在录屏时压黑底 + 压红点
-    if (DAOBool(@"islandgv_dnl_enabled", NO) && captured && modeOn) {
-        DAOHideBackdropIn(pill, YES);
-    } else {
-        DAORestoreAll();
-    }
-    // 禁用岛阴影模糊：常驻移除材质
-    if (DAOBool(@"islandgv_dnl_shadow_disabled", NO)) DAOHideBackdropIn(pill, NO);
+    // 录屏隐藏原生岛（原版走 setShadowStyle: 那条路，这里先压背板）
+    if (DAOBool(@"islandgv_dnl_enabled", NO) && captured && recPill) DAOHideBackdropIn(recPill, YES);
+    else DAORestoreAll();
+    if (DAOBool(@"islandgv_dnl_shadow_disabled", NO) && hostPill) DAOHideBackdropIn(hostPill, NO);
 
-    @try { DAOPlaceSpin(pill); } @catch (...) {}
-    @try { DAOAttachAperture(pill, expanded); } @catch (...) {}
+    if (musicPill) @try { DAOPlaceSpin(musicPill); } @catch (...) {}
+    @try { DAOAttachAperture(hostPill, expanded); } @catch (...) {}
 
     gSnapshot = DAOCurrentConfig();
+
     if (verbose) {
-        UIView *dbgDot = DAODotInPill(pill);
-        DAOLog(@"scan pill=%@ expanded=%d mode=%d dot=%@ eye=%@ dance=%@",
-               NSStringFromCGRect(pr), expanded, modeOn,
-               dbgDot ? NSStringFromCGRect(DAOScreenRect(dbgDot)) : @"none",
+        DAOLog(@"scan rec=%@ music=%@ expanded=%d mode=%d eye=%@ dance=%@",
+               recPill ? NSStringFromCGRect(DAOScreenRect(recPill)) : @"-",
+               musicPill ? NSStringFromCGRect(DAOScreenRect(musicPill)) : @"-",
+               expanded, modeOn,
                (gLeftSprite && !gLeftSprite.hidden) ? NSStringFromCGRect(gLeftSprite.frame) : @"-",
                (gRightSprite && !gRightSprite.hidden) ? NSStringFromCGRect(gRightSprite.frame) : @"-");
-        for (UIView *d in DAORecordingDots())
-            DAOLog(@"  dot %@ %@ alpha=%.2f", NSStringFromClass(d.class),
-                   NSStringFromCGRect(DAOScreenRect(d)), d.alpha);
         for (UIView *p in DAOPills())
             DAOLog(@"  pill id=%@ %@", p.accessibilityIdentifier ?: @"-",
                    NSStringFromCGRect(DAOScreenRect(p)));
     }
+    #undef DAO_CLEAR_ALL
 }
-
-#pragma mark - 扫描节流
-
-static NSTimeInterval gLastScan = -1e9;
-static BOOL gScanQueued = NO;
 
 static void DAOScanSoon(double delay, BOOL verbose) {
     if (gScanQueued) return;
