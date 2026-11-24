@@ -512,14 +512,16 @@ static void DAOSetAnim(CALayer *layer, NSString *key, NSString *path, id from, i
     // 视图自身就摆在岛的屏幕矩形上，子图层坐标一律用「本地坐标」（原点 0,0），
     // 这样无需任何平移换算 —— 以前按屏幕绝对坐标画路径再平移 14pt，导致整圈
     // 偏移了一个岛的坐标量（表现为光圈跑到右上角）。
-    self.frame = rect;
-    self.bounds = CGRectMake(0, 0, rect.size.width, rect.size.height);
+    // 另外留出 pad：描边有一半线宽在路径外侧，不留边会被图层边界裁掉。
+    CGFloat pad = thickness * 2.0 + 6.0;
+    self.frame = CGRectInset(rect, -pad, -pad);
+    self.bounds = CGRectMake(0, 0, rect.size.width + pad * 2.0, rect.size.height + pad * 2.0);
     self.ring.frame = self.bounds;
     self.maskShape.frame = self.bounds;
     self.rainbow.frame = self.bounds;
     self.emitter.frame = self.bounds;
 
-    CGRect local = self.bounds;
+    CGRect local = CGRectMake(pad, pad, rect.size.width, rect.size.height);
     CGRect ringRect = CGRectInset(local, -(thickness / 2.0), -(thickness / 2.0));
     CGFloat radius = MIN(ringRect.size.height, ringRect.size.width) / 2.0;
     UIBezierPath *path = [UIBezierPath bezierPathWithRoundedRect:ringRect cornerRadius:radius];
