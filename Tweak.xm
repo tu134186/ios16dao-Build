@@ -507,24 +507,25 @@ static void DAOSetAnim(CALayer *layer, NSString *key, NSString *path, id from, i
     NSInteger style   = (NSInteger)DAODouble(@"aperture_style", 0, 0, 4);
     UIColor *color    = DAOColorFromHex(DAOString(@"aperture_color"), UIColor.systemBlueColor);
 
-    CGRect ringRect = CGRectInset(rect, -(thickness / 2.0), -(thickness / 2.0));
-    CGFloat radius = MIN(ringRect.size.height, ringRect.size.width) / 2.0;
-    UIBezierPath *path = [UIBezierPath bezierPathWithRoundedRect:ringRect cornerRadius:radius];
-
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    self.frame = CGRectInset(rect, -thickness * 4.0, -thickness * 4.0);
-    CGPoint shift = CGPointMake(thickness * 4.0, thickness * 4.0);
-    CGAffineTransform t = CGAffineTransformMakeTranslation(-shift.x, -shift.y);
+    // 视图自身就摆在岛的屏幕矩形上，子图层坐标一律用「本地坐标」（原点 0,0），
+    // 这样无需任何平移换算 —— 以前按屏幕绝对坐标画路径再平移 14pt，导致整圈
+    // 偏移了一个岛的坐标量（表现为光圈跑到右上角）。
+    self.frame = rect;
+    self.bounds = CGRectMake(0, 0, rect.size.width, rect.size.height);
     self.ring.frame = self.bounds;
     self.maskShape.frame = self.bounds;
     self.rainbow.frame = self.bounds;
     self.emitter.frame = self.bounds;
 
-    CGPathRef p = CGPathCreateCopyByTransformingPath(path.CGPath, &t);
-    self.ring.path = p;
-    self.maskShape.path = p;
-    CGPathRelease(p);
+    CGRect local = self.bounds;
+    CGRect ringRect = CGRectInset(local, -(thickness / 2.0), -(thickness / 2.0));
+    CGFloat radius = MIN(ringRect.size.height, ringRect.size.width) / 2.0;
+    UIBezierPath *path = [UIBezierPath bezierPathWithRoundedRect:ringRect cornerRadius:radius];
+
+    self.ring.path = path.CGPath;
+    self.maskShape.path = path.CGPath;
 
     self.ring.lineWidth = thickness;
     self.maskShape.lineWidth = thickness;

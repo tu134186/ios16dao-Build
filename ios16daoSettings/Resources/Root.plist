@@ -348,8 +348,6 @@
 			<string>com.minis.ios16dao</string>
 			<key>format</key>
 			<string>%.1f</string>
-			<key>height</key>
-			<integer>44</integer>
 			<key>id</key>
 			<string>shadow_row_1</string>
 			<key>key</key>
@@ -376,8 +374,6 @@
 			<string>com.minis.ios16dao</string>
 			<key>format</key>
 			<string>%.2f</string>
-			<key>height</key>
-			<integer>44</integer>
 			<key>id</key>
 			<string>shadow_row_2</string>
 			<key>key</key>
@@ -404,8 +400,6 @@
 			<string>com.minis.ios16dao</string>
 			<key>format</key>
 			<string>%.1f</string>
-			<key>height</key>
-			<integer>44</integer>
 			<key>id</key>
 			<string>shadow_row_3</string>
 			<key>key</key>
@@ -432,8 +426,6 @@
 			<string>com.minis.ios16dao</string>
 			<key>format</key>
 			<string>%.1f</string>
-			<key>height</key>
-			<integer>44</integer>
 			<key>id</key>
 			<string>shadow_row_4</string>
 			<key>key</key>

@@ -65,16 +65,17 @@ static NSArray<NSString *> *DAOFolders(void) {
                                                             detail:nil cell:PSStaticTextCell edit:nil];
             loaded = @[err];
         }
-        _specifiers = [loaded mutableCopy];
-        for (PSSpecifier *spec in _specifiers) {
+        // 阴影相关的 4 行只在「显示光圈阴影」打开时才存在。
+        // 不能用 height=0 隐藏：那样行仍在绘制，会跟上一行叠在一起。
+        BOOL shadowOn = [DAOPref(@"aperture_shadow_style") boolValue];
+        NSMutableArray *kept = [NSMutableArray array];
+        for (PSSpecifier *spec in loaded) {
             if ([spec propertyForKey:@"action"]) [spec setTarget:self];
-            // 阴影相关的 4 行只在「显示光圈阴影」打开时才有意义
             NSString *sid = [spec propertyForKey:@"id"];
-            if ([sid hasPrefix:@"shadow_row_"]) {
-                BOOL on = [DAOPref(@"aperture_shadow_style") boolValue];
-                if (!on) [spec setProperty:@0 forKey:@"height"];
-            }
+            if ([sid hasPrefix:@"shadow_row_"] && !shadowOn) continue;
+            [kept addObject:spec];
         }
+        _specifiers = kept;
     }
     return _specifiers;
 }
@@ -82,15 +83,10 @@ static NSArray<NSString *> *DAOFolders(void) {
 #pragma mark - 行内说明刷新
 
 - (void)refreshDynamicRows {
-    BOOL shadowOn = [DAOPref(@"aperture_shadow_style") boolValue];
     NSArray *apps = DAOPref(@"islandgv_excluded_apps");
     id folder = DAOPref(@"islandgv_folder");
     for (PSSpecifier *spec in self.specifiers) {
-        NSString *sid = [spec propertyForKey:@"id"];
         NSString *key = [spec propertyForKey:@"key"];
-        if ([sid hasPrefix:@"shadow_row_"]) {
-            [spec setProperty:(shadowOn ? @44 : @0) forKey:@"height"];
-        }
         if ([key isEqualToString:@"islandgv_excluded_apps"]) {
             NSUInteger n = [apps isKindOfClass:[NSArray class]] ? [apps count] : 0;
             [spec setProperty:(n ? [NSString stringWithFormat:@"应用上岛屏蔽（已选 %lu 个）", (unsigned long)n]
@@ -105,6 +101,18 @@ static NSArray<NSString *> *DAOFolders(void) {
         }
     }
     [self reloadSpecifiers];
+}
+
+- (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier {
+    [super setPreferenceValue:value specifier:specifier];
+    NSString *key = [specifier propertyForKey:@"key"];
+    // 「显示光圈阴影」切换后，那 4 行要真正插入/移除，不能只改高度
+    if ([key isEqualToString:@"aperture_shadow_style"]) {
+        _specifiers = nil;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            @try { [self reloadSpecifiers]; } @catch (...) {}
+        });
+    }
 }
 
 - (void)viewWillAppear:(BOOL)animated {
