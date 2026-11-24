@@ -673,6 +673,9 @@ static void DAORestoreDots(void) {
 //   element-identifier:systemApertureElementIdentifierScreenRecording
 // 所以必须逐个容器按自己的 identifier 分类 —— 不能「取最宽的那个」，
 // 因为录屏和时钟/音乐可以同时各有一个容器（日志 817219872.6 就是这样）。
+static BOOL DAOHasTag(UIView *pill, NSString *token, NSInteger depth);
+static UIImageView *DAOArtworkInPill(UIView *pill, CGRect *visibleOut);
+
 static UIView *DAOPillForElement(NSString *token, BOOL *found) {
     if (found) *found = NO;
     UIView *best = nil; CGRect bestRect = CGRectZero;
@@ -981,7 +984,8 @@ static BOOL DAOPlaceSide(BOOL left, UIView *pill, CGRect pillRect,
                                 options:UIViewAnimationOptionBeginFromCurrentState |
                                         UIViewAnimationOptionCurveEaseOut |
                                         UIViewAnimationOptionAllowUserInteraction
-                             animations:^{ sp.frame = frame; }];
+                             animations:^{ sp.frame = frame; }
+                             completion:nil];
         }
     }
     sp.hidden = NO;
@@ -1165,7 +1169,8 @@ static BOOL DAORefreshGeometryOnly(UIView *pill, CGRect pr, BOOL modeOn, BOOL ex
                                     options:UIViewAnimationOptionBeginFromCurrentState |
                                             UIViewAnimationOptionCurveEaseOut |
                                             UIViewAnimationOptionAllowUserInteraction
-                                 animations:^{ sp.frame = f; }];
+                                 animations:^{ sp.frame = f; }
+                                 completion:nil];
             }
         }
         sp.alpha = alpha;
