@@ -219,6 +219,42 @@ static NSString *DAOFolderMediaPath(void) {
     return [[DAORootDir() stringByAppendingPathComponent:folder] stringByAppendingPathComponent:files.firstObject];
 }
 
+#pragma mark - 逐帧精灵
+
+@interface DAOSpriteView : UIImageView
+- (void)play:(NSArray<UIImage *> *)frames interval:(CGFloat)interval;
+- (void)halt;
+@end
+
+@implementation DAOSpriteView
+- (instancetype)initWithFrame:(CGRect)frame {
+    if ((self = [super initWithFrame:frame])) {
+        self.userInteractionEnabled = NO;
+        self.contentMode = UIViewContentModeScaleAspectFit;
+        self.backgroundColor = UIColor.clearColor;
+        self.layer.masksToBounds = NO;
+    }
+    return self;
+}
+- (void)play:(NSArray<UIImage *> *)frames interval:(CGFloat)interval {
+    if (frames.count == 0) return;
+    CGFloat d = MAX(0.01, interval) * frames.count;
+    if (self.animationImages == frames && fabs(self.animationDuration - d) < 0.004) {
+        if (!self.isAnimating) [self startAnimating];
+        return;
+    }
+    [self stopAnimating];
+    self.animationImages = frames;
+    self.animationDuration = d;
+    self.animationRepeatCount = 0;
+    [self startAnimating];
+}
+- (void)halt {
+    [self stopAnimating];
+    self.animationImages = nil;
+}
+@end
+
 static NSArray<UIImage *> *DAOGIFFrames(NSString *path);
 
 @interface DAOMediaView : UIView
