@@ -29,7 +29,7 @@ jobs:
           for p in root.rglob('*.plist'):
               if '.git' not in p.parts:
                   plistlib.loads(p.read_bytes())
-          for name in ['ios16daoPrefs']:
+          for name in ['ios16daoSettings']:
               info = plistlib.loads((root/name/'Resources/Info.plist').read_bytes())
               assert info['CFBundleVersion'] == version, 'bundle version mismatch'
               assert info['CFBundleShortVersionString'] == version
@@ -77,7 +77,7 @@ jobs:
           dest = Path('_unpacked')
           subprocess.run(['dpkg-deb','-x',str(deb),str(dest)], check=True)
           assert len(list(dest.rglob('ios16dao.dylib'))) == 1
-          bundles = list(dest.rglob('ios16daoPrefs.bundle'))
+          bundles = list(dest.rglob('ios16daoSettings.bundle'))
           assert len(bundles) == 1, bundles
           info = plistlib.loads((bundles[0]/'Info.plist').read_bytes())
           assert info['CFBundleVersion'] == os.environ['DELIVERY_VERSION']
