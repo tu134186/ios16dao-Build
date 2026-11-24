@@ -631,14 +631,14 @@ static NSArray<UIView *> *DAOPills(void) {
     for (UIWindow *w in DAOAllWindows()) {
         [stack addObject:w];
     }
-    CGFloat maxW = DAOPowerSaving() ? 210.0 : 340.0;
     while (stack.count) {
         UIView *v = stack.lastObject; [stack removeLastObject];
         NSString *cn = NSStringFromClass(v.class);
         if ([cn isEqualToString:@"SBSystemApertureContainerView"] || [cn isEqualToString:@"_SBSystemApertureContainerView"]) {
             if (v.window && !v.hidden && v.alpha > 0.01) {
+                // 原版判定（反汇编 0x161d4）：identifier 非空 && bounds 宽>=30 高>=20
                 CGSize b = v.bounds.size;
-                if (b.width >= 18 && b.width <= maxW && b.height >= 16 && b.height <= 96) {
+                if (b.width >= 30.0 && b.height >= 20.0) {
                     CGRect r = DAOScreenRect(v);
                     if (DAOOnScreen(r)) [out addObject:v];
                 }
@@ -841,6 +841,56 @@ static CGRect DAOSquare(CGPoint center, CGFloat side) {
 // 左侧 = 写轮眼（录屏），右侧 = 跳舞（音乐）
 // 结构照原版：视图直接 addSubview 到灵动岛容器里（原版叫 axsContainer），
 // 用「岛内本地坐标」摆放 —— 不再用覆盖层窗口 + 屏幕坐标，那套会飘出岛外。
+#pragma mark - 配置快照（原版 0x16694 的变更检测，阈值 0.0001）
+//
+// 原版在这里判断：album/dance 开关 + interval 与上一次完全一致时，
+// 直接复用已有视图、只更新 frame，不拆不建。这是它流畅的根本原因。
+// 我原来每次扫描都走一遍 play/halt，视图被反复重建 → 卡顿、闪烁。
+
+typedef struct {
+    BOOL album, dance, mask, captured;
+    CGFloat interval, leftSize, rightSize, leftOff, rightOff, scale, alpha, maxEdge;
+    BOOL valid;
+} DAOConfigSnapshot;
+
+static DAOConfigSnapshot gSnapshot;
+static int gRebuildCount;
+
+static DAOConfigSnapshot DAOCurrentConfig(void) {
+    DAOConfigSnapshot c;
+    c.album    = DAOBool(@"islandgv_active_custom_album", NO);
+    c.dance    = DAOBool(@"islandgv_active_custom_dance", NO);
+    c.mask     = DAOBool(@"islandgv_active_enable_mask", YES);
+    c.captured = [UIScreen mainScreen].isCaptured;
+    c.interval = DAODouble(@"islandgv_active_frame_interval", 0.1, 0.01, 0.2);
+    c.leftSize = DAODouble(@"islandgv_active_left_size", 0.9, 0.6, 2.0);
+    c.rightSize= DAODouble(@"islandgv_active_right_size", 0.9, 0.6, 2.0);
+    c.leftOff  = DAODouble(@"islandgv_active_left_offset", 1.5, -10.0, 10.0);
+    c.rightOff = DAODouble(@"islandgv_active_right_offset", 1.5, -10.0, 10.0);
+    c.scale    = DAODouble(@"islandgv_scale", 1.0, 0.5, 1.5);
+    c.alpha    = DAODouble(@"islandgv_alpha", 1.0, 0.0, 1.0);
+    c.maxEdge  = DAODouble(@"islandgv_active_decode_max_edge", 220.0, 160.0, 320.0);
+    c.valid    = YES;
+    return c;
+}
+
+static BOOL DAOConfigChanged(void) {
+    if (!gSnapshot.valid) return YES;
+    DAOConfigSnapshot c = DAOCurrentConfig();
+    if (c.album != gSnapshot.album || c.dance != gSnapshot.dance ||
+        c.mask != gSnapshot.mask || c.captured != gSnapshot.captured) return YES;
+    // 浮点按原版的 1e-4 精度比较，避免拖滑块时每次微小抖动都重建
+    if (fabs(c.interval  - gSnapshot.interval)  > 1e-4) return YES;
+    if (fabs(c.leftSize  - gSnapshot.leftSize)  > 1e-4) return YES;
+    if (fabs(c.rightSize - gSnapshot.rightSize) > 1e-4) return YES;
+    if (fabs(c.leftOff   - gSnapshot.leftOff)   > 1e-4) return YES;
+    if (fabs(c.rightOff  - gSnapshot.rightOff)  > 1e-4) return YES;
+    if (fabs(c.scale     - gSnapshot.scale)     > 1e-4) return YES;
+    if (fabs(c.alpha     - gSnapshot.alpha)     > 1e-4) return YES;
+    if (fabs(c.maxEdge   - gSnapshot.maxEdge)   > 1e-4) return YES;
+    return NO;
+}
+
 static void DAOReparent(UIView *v, UIView *host) {
     if (!v || !host) return;
     if (v.superview != host) {
@@ -1059,6 +1109,50 @@ static void DAOAttachAperture(UIView *pill, BOOL expanded) {
     [gAperture applyRect:local active:YES];
 }
 
+static BOOL DAORefreshGeometryOnly(UIView *pill, CGRect pr, BOOL modeOn, BOOL expanded);
+
+// 配置没变时走的轻量路径：只把已有视图的 frame 跟着岛更新，
+// 不调用 play/halt、不 addSubview/removeFromSuperview —— 这是原版的流畅来源。
+static BOOL DAORefreshGeometryOnly(UIView *pill, CGRect pr, BOOL modeOn, BOOL expanded) {
+    if (!pill || !modeOn) return NO;
+    CGRect pb = pill.bounds;
+    if (pb.size.height < 8) return NO;
+
+    CGFloat scale = DAODouble(@"islandgv_scale", 1.0, 0.5, 1.5);
+    CGFloat alpha = DAODouble(@"islandgv_alpha", 1.0, 0.0, 1.0);
+    CGFloat h = pb.size.height;
+
+    struct { BOOL left; BOOL on; CGFloat size; CGFloat off; } sides[2] = {
+        { YES, DAOBool(@"islandgv_active_custom_album", NO),
+              DAODouble(@"islandgv_active_left_size", 0.9, 0.6, 2.0),
+              DAODouble(@"islandgv_active_left_offset", 1.5, -10.0, 10.0) },
+        { NO,  DAOBool(@"islandgv_active_custom_dance", NO),
+              DAODouble(@"islandgv_active_right_size", 0.9, 0.6, 2.0),
+              DAODouble(@"islandgv_active_right_offset", 1.5, -10.0, 10.0) },
+    };
+
+    for (int i = 0; i < 2; i++) {
+        BOOL left = sides[i].left;
+        DAOSpriteView *sp = left ? gLeftSprite : gRightSprite;
+        if (!sp || sp.hidden || !sp.superview) continue;
+        if (!sides[i].on) continue;
+        CGFloat side = MIN(h * MAX(0.1, sides[i].size) * MAX(0.4, scale), h * 1.10);
+        CGFloat off = left ? sides[i].off : -sides[i].off;
+        CGFloat cx = left ? (h / 2.0 + off) : (pb.size.width - h / 2.0 + off);
+        CGFloat half = side / 2.0;
+        cx = MAX(half - h * 0.5, MIN(pb.size.width - half + h * 0.5, cx));
+        CGRect f = CGRectMake(cx - half, h / 2.0 - half, side, side);
+        if (!CGRectEqualToRect(sp.frame, f)) {
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            sp.frame = f;
+            [CATransaction commit];
+        }
+        sp.alpha = alpha;
+    }
+    return YES;
+}
+
 static void DAOScan(BOOL verbose) {
     if (!DAOAnyOn() && !DAOBool(@"aperture_enabled", NO)) {
         DAOHideSprite(YES); DAOHideSprite(NO);
@@ -1093,6 +1187,19 @@ static void DAOScan(BOOL verbose) {
     CGFloat scale = DAODouble(@"islandgv_scale", 1.0, 0.5, 1.5);
 
     BOOL modeOn = expanded ? DAOExpandedOn() : DAOPillOn();
+
+    // 快速路径：配置没变 → 只更新几何，绝不重建视图（对齐原版 0x16694 变更门控）
+    BOOL changed = DAOConfigChanged();
+    if (!changed && modeOn) {
+        BOOL fast = DAORefreshGeometryOnly(pill, pr, modeOn, expanded);
+        if (fast) {
+            // 录屏压背板 / 光圈仍需每帧维护（它们不涉及视图重建）
+            BOOL capturedNow = [UIScreen mainScreen].isCaptured;
+            if (DAOBool(@"islandgv_dnl_enabled", NO) && capturedNow) DAOHideBackdropIn(pill, YES);
+            @try { DAOAttachAperture(pill, expanded); } @catch (...) {}
+            return;
+        }
+    }
 
     // 门控：左侧只在「正在录屏」或岛里确实有录屏元素时出现；
     // 右侧只在岛里确实有正在播放的音乐元素时出现。
@@ -1131,6 +1238,7 @@ static void DAOScan(BOOL verbose) {
     @try { DAOPlaceSpin(pill); } @catch (...) {}
     @try { DAOAttachAperture(pill, expanded); } @catch (...) {}
 
+    gSnapshot = DAOCurrentConfig();
     if (verbose) {
         UIView *dbgDot = DAODotInPill(pill);
         DAOLog(@"scan pill=%@ expanded=%d mode=%d dot=%@ eye=%@ dance=%@",
