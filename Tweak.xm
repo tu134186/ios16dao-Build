@@ -854,7 +854,6 @@ typedef struct {
 } DAOConfigSnapshot;
 
 static DAOConfigSnapshot gSnapshot;
-static int gRebuildCount;
 
 static DAOConfigSnapshot DAOCurrentConfig(void) {
     DAOConfigSnapshot c;
