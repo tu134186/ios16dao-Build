@@ -219,94 +219,6 @@ static NSString *DAOFolderMediaPath(void) {
     return [[DAORootDir() stringByAppendingPathComponent:folder] stringByAppendingPathComponent:files.firstObject];
 }
 
-#pragma mark - 覆盖层
-
-static UIWindow *gOverlay;
-static UIView *gStage;
-static NSArray<UIWindow *> *DAOAllWindows(void);
-
-@interface DAOOverlayWindow : UIWindow
-@end
-@implementation DAOOverlayWindow
-- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event { (void)point; (void)event; return NO; }
-@end
-
-static UIWindowScene *DAOWindowScene(void) {
-    for (UIScene *s in UIApplication.sharedApplication.connectedScenes)
-        if ([s isKindOfClass:[UIWindowScene class]]) return (UIWindowScene *)s;
-    return nil;
-}
-
-static void DAOEnsureOverlay(void) {
-    if (gOverlay && gStage) return;
-    @try {
-        UIWindowScene *scene = DAOWindowScene();
-        DAOOverlayWindow *w = scene ? [[DAOOverlayWindow alloc] initWithWindowScene:scene]
-                                    : [[DAOOverlayWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-        w.frame = [UIScreen mainScreen].bounds;
-        CGFloat level = 0;
-        for (UIWindow *iw in DAOAllWindows()) {
-            NSString *cn = NSStringFromClass(iw.class);
-            if ([cn containsString:@"Aperture"] || [cn containsString:@"RecordingIndicator"])
-                level = MAX(level, iw.windowLevel);
-        }
-        w.windowLevel = MAX(level + 100.0, 10000000.0);
-        w.backgroundColor = UIColor.clearColor;
-        w.userInteractionEnabled = NO;
-        w.hidden = NO;
-
-        UIViewController *vc = [[UIViewController alloc] init];
-        vc.view.backgroundColor = UIColor.clearColor;
-        vc.view.userInteractionEnabled = NO;
-        w.rootViewController = vc;
-
-        UIView *stage = [[UIView alloc] initWithFrame:w.bounds];
-        stage.backgroundColor = UIColor.clearColor;
-        stage.userInteractionEnabled = NO;
-        [vc.view addSubview:stage];
-
-        gOverlay = w; gStage = stage;
-    } @catch (...) { gOverlay = nil; gStage = nil; }
-}
-
-#pragma mark - 逐帧精灵
-
-@interface DAOSpriteView : UIImageView
-- (void)play:(NSArray<UIImage *> *)frames interval:(CGFloat)interval;
-- (void)halt;
-@end
-
-@implementation DAOSpriteView
-- (instancetype)initWithFrame:(CGRect)frame {
-    if ((self = [super initWithFrame:frame])) {
-        self.userInteractionEnabled = NO;
-        self.contentMode = UIViewContentModeScaleAspectFit;
-        self.backgroundColor = UIColor.clearColor;
-        self.layer.masksToBounds = NO;
-    }
-    return self;
-}
-- (void)play:(NSArray<UIImage *> *)frames interval:(CGFloat)interval {
-    if (frames.count == 0) return;
-    CGFloat d = MAX(0.01, interval) * frames.count;
-    if (self.animationImages == frames && fabs(self.animationDuration - d) < 0.004) {
-        if (!self.isAnimating) [self startAnimating];
-        return;
-    }
-    [self stopAnimating];
-    self.animationImages = frames;
-    self.animationDuration = d;
-    self.animationRepeatCount = 0;
-    [self startAnimating];
-}
-- (void)halt {
-    [self stopAnimating];
-    self.animationImages = nil;
-}
-@end
-
-#pragma mark - 多媒体精灵（mp4 / gif / 静态图）
-
 static NSArray<UIImage *> *DAOGIFFrames(NSString *path);
 
 @interface DAOMediaView : UIView
@@ -681,7 +593,6 @@ static NSArray<UIView *> *DAOPills(void) {
     NSMutableArray<UIView *> *out = [NSMutableArray array];
     NSMutableArray<UIView *> *stack = [NSMutableArray array];
     for (UIWindow *w in DAOAllWindows()) {
-        if (gOverlay && w == gOverlay) continue;
         [stack addObject:w];
     }
     CGFloat maxW = DAOPowerSaving() ? 210.0 : 340.0;
@@ -707,7 +618,6 @@ static NSArray<UIView *> *DAORecordingDots(void) {
     NSMutableArray<UIView *> *out = [NSMutableArray array];
     NSMutableArray<UIView *> *stack = [NSMutableArray array];
     for (UIWindow *w in DAOAllWindows()) {
-        if (gOverlay && w == gOverlay) continue;
         [stack addObject:w];
     }
     while (stack.count) {
