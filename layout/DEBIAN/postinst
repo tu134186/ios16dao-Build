@@ -1,0 +1,6 @@
+#!/bin/sh
+ROOT=/var/mobile/ios16dao
+mkdir -p "$ROOT/帧率素材/eye" "$ROOT/帧率素材/dance" "$ROOT/帧率素材/mask"
+chown -R mobile:mobile "$ROOT" 2>/dev/null || true
+chmod -R 755 "$ROOT" 2>/dev/null || true
+exit 0

@@ -517,6 +517,7 @@ static void DAOSetAnim(CALayer *layer, NSString *key, NSString *path, id from, i
     CGPoint shift = CGPointMake(thickness * 4.0, thickness * 4.0);
     CGAffineTransform t = CGAffineTransformMakeTranslation(-shift.x, -shift.y);
     self.ring.frame = self.bounds;
+    self.maskShape.frame = self.bounds;
     self.rainbow.frame = self.bounds;
     self.emitter.frame = self.bounds;
 

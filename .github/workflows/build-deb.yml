@@ -77,6 +77,8 @@ jobs:
           dest = Path('_unpacked')
           subprocess.run(['dpkg-deb','-x',str(deb),str(dest)], check=True)
           assert len(list(dest.rglob('ios16dao.dylib'))) == 1
+          assert len(list(dest.rglob('ios16dao.plist'))) == 1
+          assert not list(dest.rglob('DynamicIslandDance*')), 'stale files'
           bundles = list(dest.rglob('ios16daoSettings.bundle'))
           assert len(bundles) == 1, bundles
           info = plistlib.loads((bundles[0]/'Info.plist').read_bytes())
