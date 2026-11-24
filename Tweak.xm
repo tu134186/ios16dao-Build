@@ -1198,6 +1198,11 @@ static void DAOScan(BOOL verbose) {
     #undef DAO_CLEAR_ALL
 }
 
+#pragma mark - 扫描节流
+
+static NSTimeInterval gLastScan = -1e9;
+static BOOL gScanQueued = NO;
+
 static void DAOScanSoon(double delay, BOOL verbose) {
     if (gScanQueued) return;
     gScanQueued = YES;
