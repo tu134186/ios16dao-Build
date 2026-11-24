@@ -859,26 +859,23 @@ static DAOApertureView *gAperture;
 static NSString *gMediaPathLeft, *gMediaPathRight;
 
 static DAOSpriteView *DAOSprite(BOOL left) {
-    DAOEnsureOverlay();
-    if (!gStage) return nil;
+    // 不建覆盖层：视图直接挂进岛容器
+    if (!NSThread.isMainThread) return nil;
     __strong DAOSpriteView **slot = left ? &gLeftSprite : &gRightSprite;
     if (!*slot) {
         DAOSpriteView *v = [[DAOSpriteView alloc] initWithFrame:CGRectZero];
         v.hidden = YES;
-        [gStage addSubview:v];
         *slot = v;
     }
     return *slot;
 }
 
 static DAOMediaView *DAOMedia(BOOL left) {
-    DAOEnsureOverlay();
-    if (!gStage) return nil;
+    if (!NSThread.isMainThread) return nil;
     __strong DAOMediaView **slot = left ? &gLeftMedia : &gRightMedia;
     if (!*slot) {
         DAOMediaView *v = [[DAOMediaView alloc] initWithFrame:CGRectZero];
         v.hidden = YES;
-        [gStage addSubview:v];
         *slot = v;
     }
     return *slot;
@@ -896,50 +893,69 @@ static CGRect DAOSquare(CGPoint center, CGFloat side) {
 }
 
 // 左侧 = 写轮眼（录屏），右侧 = 跳舞（音乐）
-// 关键：左侧圆心优先跟随「系统录屏红点的实际位置」，而不是按岛两端推算 ——
-// 宽岛里红点不一定在左端点圆心，推算会偏到旁边（表现为素材蹦出来但没盖住红点）。
+// 结构照原版：视图直接 addSubview 到灵动岛容器里（原版叫 axsContainer），
+// 用「岛内本地坐标」摆放 —— 不再用覆盖层窗口 + 屏幕坐标，那套会飘出岛外。
+static void DAOReparent(UIView *v, UIView *host) {
+    if (!v || !host) return;
+    if (v.superview != host) {
+        [v removeFromSuperview];
+        [host addSubview:v];
+    }
+    [host bringSubviewToFront:v];
+}
+
 static BOOL DAOPlaceSide(BOOL left, UIView *pill, CGRect pillRect,
                          CGFloat sideFactor, CGFloat offset, CGFloat scale, CGFloat alpha) {
-    CGFloat interval = DAODouble(@"islandgv_active_frame_interval", 0.1, 0.01, 0.2);
-    CGFloat side = pillRect.size.height * sideFactor;
-    side = MIN(side, pillRect.size.height) * MAX(0.4, scale);
-    if (side < 8) { DAOHideSprite(left); return NO; }
+    if (!pill) { DAOHideSprite(left); return NO; }
+    CGRect pb = pill.bounds;
+    if (pb.size.height < 8 || pb.size.width < 8) { DAOHideSprite(left); return NO; }
 
-    CGFloat radius = pillRect.size.height / 2.0;
+    CGFloat interval = DAODouble(@"islandgv_active_frame_interval", 0.1, 0.01, 0.2);
+    CGFloat h = pb.size.height;
+
+    // 尺寸：以岛高为基准，原版默认 0.90x
+    CGFloat side = h * MAX(0.1, sideFactor) * MAX(0.4, scale);
+    side = MIN(side, h * 1.10);
+
+    // 圆心：优先用红点在岛内的真实中心；没有红点就贴该侧端点圆心
     CGPoint center;
     UIView *dot = left ? DAODotInPill(pill) : nil;
-    if (dot) {
-        // 红点：圆心直接用它的屏幕中心，最准
-        CGRect dr = DAOScreenRect(dot);
-        center = CGPointMake(CGRectGetMidX(dr) + offset, CGRectGetMidY(dr));
-        // 素材至少比红点大一点，才能完全盖住
-        CGFloat dotMax = MAX(dr.size.width, dr.size.height);
-        side = MAX(side, dotMax * 1.35);
-        DAOHideDot(dot);
+    if (dot && dot.window) {
+        CGRect local = CGRectZero;
+        @try { local = [dot convertRect:dot.bounds toView:pill]; } @catch (...) {}
+        if (local.size.width > 0.5 && local.size.height > 0.5) {
+            center = CGPointMake(CGRectGetMidX(local) + offset, CGRectGetMidY(local));
+            side = MAX(side, MAX(local.size.width, local.size.height) * 1.30);
+            side = MIN(side, h * 1.25);
+            DAOHideDot(dot);
+        } else {
+            center = left ? CGPointMake(h / 2.0 + offset, h / 2.0)
+                          : CGPointMake(pb.size.width - h / 2.0 - offset, h / 2.0);
+        }
     } else {
-        CGFloat x = left ? (CGRectGetMinX(pillRect) + radius + offset)
-                         : (CGRectGetMaxX(pillRect) - radius - offset);
-        center = CGPointMake(x, CGRectGetMidY(pillRect));
+        center = left ? CGPointMake(h / 2.0 + offset, h / 2.0)
+                      : CGPointMake(pb.size.width - h / 2.0 - offset, h / 2.0);
     }
-    // 夹在岛内，不允许整块跑出屏幕
+
+    // 夹在岛内，避免整块跑出去
     CGFloat half = side / 2.0;
-    center.x = MAX(CGRectGetMinX(pillRect) + half - radius * 0.5,
-                   MIN(CGRectGetMaxX(pillRect) - half + radius * 0.5, center.x));
-    center.y = MAX(CGRectGetMinY(pillRect) + half - radius * 0.5,
-                   MIN(CGRectGetMaxY(pillRect) + half + radius * 0.5, center.y));
-    CGRect frame = DAOSquare(center, side);
+    center.x = MAX(half - h * 0.5, MIN(pb.size.width - half + h * 0.5, center.x));
+    center.y = MAX(half - h * 0.5, MIN(pb.size.height - half + h * 0.5, center.y));
+    side = MIN(side, MAX(pb.size.width, pb.size.height) * 1.2);
+    half = side / 2.0;
+    CGRect frame = CGRectMake(center.x - half, center.y - half, side, side);
 
     // 1) 选中的素材文件夹（mp4 / gif / png）优先
     NSString *mediaPath = DAOFolderMediaPath();
     __strong NSString **lastPath = left ? &gMediaPathLeft : &gMediaPathRight;
     if (mediaPath.length) {
         __strong DAOSpriteView **sp = left ? &gLeftSprite : &gRightSprite;
-        if (*sp) { [(*sp) halt]; (*sp).hidden = YES; }
+        if (*sp && (*sp).superview) { [(*sp) halt]; (*sp).hidden = YES; }
         DAOMediaView *mv = DAOMedia(left);
         if (!mv) return NO;
-        if (!CGRectEqualToRect(mv.frame, frame)) {
-            [UIView performWithoutAnimation:^{ mv.frame = frame; }];
-        }
+        DAOReparent(mv, pill);
+        if (!CGRectEqualToRect(mv.frame, frame)) [CATransaction setDisableActions:YES];
+        mv.frame = frame;
         mv.hidden = NO;
         mv.alpha = alpha;
         if (![*lastPath isEqualToString:mediaPath]) {
@@ -952,16 +968,15 @@ static BOOL DAOPlaceSide(BOOL left, UIView *pill, CGRect pillRect,
     // 2) 帧率素材 PNG 序列
     {
         __strong DAOMediaView **mv = left ? &gLeftMedia : &gRightMedia;
-        if (*mv) { [(*mv) halt]; (*mv).hidden = YES; }
+        if (*mv) { [(*mv) halt]; (*mv).hidden = YES; [(*mv) removeFromSuperview]; }
         *lastPath = nil;
     }
     NSArray<UIImage *> *frames = DAOLoadFrames(left ? 1 : 0);
     if (!frames.count) { DAOHideSprite(left); return NO; }
     DAOSpriteView *sp = DAOSprite(left);
     if (!sp) return NO;
-    if (!CGRectEqualToRect(sp.frame, frame)) {
-        [UIView performWithoutAnimation:^{ sp.frame = frame; }];
-    }
+    DAOReparent(sp, pill);
+    sp.frame = frame;
     sp.hidden = NO;
     sp.alpha = alpha;
     [sp play:frames interval:interval];
@@ -1012,9 +1027,6 @@ static void DAOPlaceSpin(UIView *pill) {
         if (gSpinView) { [gSpinView.layer removeAnimationForKey:@"dao.rot"]; gSpinView.hidden = YES; }
         return;
     }
-    DAOEnsureOverlay();
-    if (!gStage) return;
-
     CGFloat diameter = MIN(vis.size.height, vis.size.width);
     CGRect frame = DAOSquare(CGPointMake(CGRectGetMidX(vis), CGRectGetMidY(vis)), diameter);
 
@@ -1024,8 +1036,12 @@ static void DAOPlaceSpin(UIView *pill) {
         gSpinView.contentMode = UIViewContentModeScaleAspectFill;
         gSpinView.backgroundColor = UIColor.clearColor;
         gSpinView.layer.masksToBounds = YES;
-        [gStage addSubview:gSpinView];
     }
+    if (gSpinView.superview != pill) {
+        [gSpinView removeFromSuperview];
+        [pill addSubview:gSpinView];
+    }
+    [pill bringSubviewToFront:gSpinView];
     if (gSpinView.image != art.image) gSpinView.image = art.image;
     gSpinView.layer.cornerRadius = diameter / 2.0;
     gSpinView.layer.mask = nil;
@@ -1081,13 +1097,20 @@ static void DAOAttachAperture(UIView *pill, BOOL expanded) {
         if (gAperture) [gAperture applyRect:CGRectZero active:NO];
         return;
     }
-    DAOEnsureOverlay();
-    if (!gStage) return;
+    if (!pill.superview && !pill.window) return;
     if (!gAperture) {
         gAperture = [[DAOApertureView alloc] initWithFrame:CGRectZero];
-        [gStage addSubview:gAperture];
+        gAperture.userInteractionEnabled = NO;
     }
-    [gAperture applyRect:DAOScreenRect(pill) active:YES];
+    if (gAperture.superview != pill.superview) {
+        [gAperture removeFromSuperview];
+        [pill.superview addSubview:gAperture];
+    }
+    // 挂进 superview 后坐标空间变了：把岛的屏幕矩形换算到该视图本地坐标
+    CGRect pr = DAOScreenRect(pill);
+    CGRect local = pr;
+    @try { local = [pill.superview convertRect:pr fromView:nil]; } @catch (...) {}
+    [gAperture applyRect:local active:YES];
 }
 
 static void DAOScan(BOOL verbose) {
@@ -1124,9 +1147,17 @@ static void DAOScan(BOOL verbose) {
     CGFloat scale = DAODouble(@"islandgv_scale", 1.0, 0.5, 1.5);
 
     BOOL modeOn = expanded ? DAOExpandedOn() : DAOPillOn();
+
+    // 门控：左侧只在「正在录屏」或岛里确实有录屏元素时出现；
+    // 右侧只在岛里确实有正在播放的音乐元素时出现。
+    // 原版靠 SAUIElementView 的生命周期驱动，不会在空岛/滑动 App 时乱冒。
+    BOOL captured = [UIScreen mainScreen].isCaptured;
+    BOOL hasRecording = captured || DAOHasTag(pill, @"ScreenRecording", 5) || DAODotInPill(pill) != nil;
+    BOOL hasNowPlaying = DAOHasTag(pill, @"NowPlaying", 5);
+
     if (modeOn) {
-        BOOL leftOn = DAOBool(@"islandgv_active_custom_album", NO);
-        BOOL rightOn = DAOBool(@"islandgv_active_custom_dance", NO);
+        BOOL leftOn = DAOBool(@"islandgv_active_custom_album", NO) && hasRecording;
+        BOOL rightOn = DAOBool(@"islandgv_active_custom_dance", NO) && hasNowPlaying;
         CGFloat lSize = DAODouble(@"islandgv_active_left_size", 0.9, 0.6, 2.0);
         CGFloat rSize = DAODouble(@"islandgv_active_right_size", 0.9, 0.6, 2.0);
         CGFloat lOff = DAODouble(@"islandgv_active_left_offset", 1.5, -10.0, 10.0);
@@ -1143,7 +1174,6 @@ static void DAOScan(BOOL verbose) {
     }
 
     // 录屏隐藏原生岛：只在录屏时压黑底 + 压红点
-    BOOL captured = [UIScreen mainScreen].isCaptured;
     if (DAOBool(@"islandgv_dnl_enabled", NO) && captured && modeOn) {
         DAOHideBackdropIn(pill, YES);
     } else {
@@ -1203,35 +1233,54 @@ static void DAOPurge(void) {
 
 %hook SBSystemApertureContainerView
 
-- (void)layoutSubviews {
+// 原版在这里只做两件事：捕获容器尺寸变化 → 重排素材；被移除 → 立刻清理。
+- (void)setBounds:(CGRect)bounds {
     %orig;
     if (!DAOAnyOn() && !DAOBool(@"aperture_enabled", NO)) return;
     @try {
-        UIView *v = (UIView *)self;
-        CGSize b = v.bounds.size;
-        if (b.width < 18 || b.width > 340 || b.height < 16 || b.height > 96) return;
+        CGSize sz = bounds.size;
+        if (sz.width < 18 || sz.width > 340 || sz.height < 16 || sz.height > 96) return;
     } @catch (...) {}
     DAOScanSoon(0.0, NO);
 }
 
+- (void)removeFromSuperview {
+    %orig;
+    @try { DAOScanSoon(0.05, NO); } @catch (...) {}
+}
+
 %end
 
-%hook SBRecordingIndicatorView
+// 核心：元素视图。内容进入 / 尺寸变化 / 移除，都从这里驱动，
+// 不再扫窗口找红点 —— 那才是「没录屏也冒素材」的根源。
+%hook SAUIElementView
 
-- (void)layoutSubviews {
+- (void)didAddSubview:(UIView *)subview {
     %orig;
     if (!DAOAnyOn()) return;
     DAOScanSoon(0.0, NO);
 }
 
+- (void)setBounds:(CGRect)bounds {
+    %orig;
+    if (!DAOAnyOn()) return;
+    DAOScanSoon(0.0, NO);
+}
+
+- (void)removeFromSuperview {
+    %orig;
+    @try { DAOScanSoon(0.05, NO); } @catch (...) {}
+}
+
 %end
 
-%hook MRUArtworkView
+%hook SBSystemApertureController
 
-- (void)layoutSubviews {
-    %orig;
-    if (!DAOBool(@"islandgv_active_enable_mask", YES)) return;
-    DAOScanSoon(0.0, NO);
+- (id)systemApertureViewController:(id)vc containsAnyContent:(BOOL)content {
+    id r = %orig;
+    if (DAOAnyOn()) DAOScanSoon(0.0, NO);
+    (void)vc; (void)content;
+    return r;
 }
 
 %end
