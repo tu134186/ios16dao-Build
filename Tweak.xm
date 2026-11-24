@@ -903,42 +903,24 @@ static BOOL DAOPlaceSide(BOOL left, UIView *pill, CGRect pillRect,
                          CGFloat sideFactor, CGFloat offset, CGFloat scale, CGFloat alpha) {
     if (!pill) { DAOHideSprite(left); return NO; }
     CGRect pb = pill.bounds;
-    if (pb.size.height < 8 || pb.size.width < 8) { DAOHideSprite(left); return NO; }
+    CGFloat W = pb.size.width, H = pb.size.height;
+    if (W < 8 || H < 8) { DAOHideSprite(left); return NO; }
 
-    CGFloat interval = DAODouble(@"islandgv_active_frame_interval", 0.1, 0.01, 0.2);
-    CGFloat h = pb.size.height;
+    // ── 以下算法逐行取自原版 0x167b4 ─────────────────────────────
+    //   CGFloat H = CGRectGetHeight(bounds);      (0x1a0b4)
+    //   CGFloat W = CGRectGetWidth(bounds);       (0x1a0f0)
+    //   side = MIN(size * H, 40.0);               (0x1689c 常量 0x4044.. = 40.0)
+    //   左: CGRectMake(offset,        (H-side)/2, side, side)      (0x168cc..0x168e4)
+    //   右: CGRectMake(W-side-offset, (H-side)/2, side, side)      (0x16908..0x1692c)
+    //   原版不做任何 clamp —— 位置就是端点，越界也不收。
+    CGFloat side = MIN(sideFactor * H, 40.0);
+    if (scale != 1.0) side = MIN(side * scale, 40.0);
+    if (side < 6.0) { DAOHideSprite(left); return NO; }
 
-    // 尺寸：以岛高为基准，原版默认 0.90x
-    CGFloat side = h * MAX(0.1, sideFactor) * MAX(0.4, scale);
-    side = MIN(side, h * 1.10);
-
-    // 圆心：优先用红点在岛内的真实中心；没有红点就贴该侧端点圆心
-    CGPoint center;
-    UIView *dot = left ? DAODotInPill(pill) : nil;
-    if (dot && dot.window) {
-        CGRect local = CGRectZero;
-        @try { local = [dot convertRect:dot.bounds toView:pill]; } @catch (...) {}
-        if (local.size.width > 0.5 && local.size.height > 0.5) {
-            center = CGPointMake(CGRectGetMidX(local) + offset, CGRectGetMidY(local));
-            side = MAX(side, MAX(local.size.width, local.size.height) * 1.30);
-            side = MIN(side, h * 1.25);
-            DAOHideDot(dot);
-        } else {
-            center = left ? CGPointMake(h / 2.0 + offset, h / 2.0)
-                          : CGPointMake(pb.size.width - h / 2.0 - offset, h / 2.0);
-        }
-    } else {
-        center = left ? CGPointMake(h / 2.0 + offset, h / 2.0)
-                      : CGPointMake(pb.size.width - h / 2.0 - offset, h / 2.0);
-    }
-
-    // 夹在岛内，避免整块跑出去
-    CGFloat half = side / 2.0;
-    center.x = MAX(half - h * 0.5, MIN(pb.size.width - half + h * 0.5, center.x));
-    center.y = MAX(half - h * 0.5, MIN(pb.size.height - half + h * 0.5, center.y));
-    side = MIN(side, MAX(pb.size.width, pb.size.height) * 1.2);
-    half = side / 2.0;
-    CGRect frame = CGRectMake(center.x - half, center.y - half, side, side);
+    CGFloat x = left ? offset : (W - side - offset);
+    CGFloat y = (H - side) / 2.0;
+    CGRect frame = CGRectMake(x, y, side, side);
+    // ────────────────────────────────────────────────────────────
 
     // 1) 选中的素材文件夹（mp4 / gif / png）优先
     NSString *mediaPath = DAOFolderMediaPath();
@@ -1135,12 +1117,11 @@ static BOOL DAORefreshGeometryOnly(UIView *pill, CGRect pr, BOOL modeOn, BOOL ex
         DAOSpriteView *sp = left ? gLeftSprite : gRightSprite;
         if (!sp || sp.hidden || !sp.superview) continue;
         if (!sides[i].on) continue;
-        CGFloat side = MIN(h * MAX(0.1, sides[i].size) * MAX(0.4, scale), h * 1.10);
-        CGFloat off = left ? sides[i].off : -sides[i].off;
-        CGFloat cx = left ? (h / 2.0 + off) : (pb.size.width - h / 2.0 + off);
-        CGFloat half = side / 2.0;
-        cx = MAX(half - h * 0.5, MIN(pb.size.width - half + h * 0.5, cx));
-        CGRect f = CGRectMake(cx - half, h / 2.0 - half, side, side);
+        CGFloat side = MIN(sides[i].size * h, 40.0);
+        if (scale != 1.0) side = MIN(side * scale, 40.0);
+        CGFloat off = sides[i].off;
+        CGFloat x = left ? off : (pb.size.width - side - off);
+        CGRect f = CGRectMake(x, (h - side) / 2.0, side, side);
         if (!CGRectEqualToRect(sp.frame, f)) {
             [CATransaction begin];
             [CATransaction setDisableActions:YES];
@@ -1220,7 +1201,7 @@ static void DAOScan(BOOL verbose) {
             DAOHideSprite(YES);
             DAORestoreDots();          // 关掉左侧动画就把原生红点还给系统
         }
-        if (rightOn) DAOPlaceSide(NO, pill, pr, rSize, -rOff, scale, alpha); else DAOHideSprite(NO);
+        if (rightOn) DAOPlaceSide(NO, pill, pr, rSize, rOff, scale, alpha); else DAOHideSprite(NO);
     } else {
         DAOHideSprite(YES); DAOHideSprite(NO);
     }
