@@ -692,15 +692,6 @@ static UIView *DAODotInPill(UIView *pill) {
 static const void *kDotAlpha = &kDotAlpha;
 static NSMutableArray<UIView *> *gHiddenDots;
 
-// 压掉原生红点（记下原 alpha，可还原）
-static void DAOHideDot(UIView *dot) {
-    if (!dot || objc_getAssociatedObject(dot, kDotAlpha)) return;
-    objc_setAssociatedObject(dot, kDotAlpha, @(dot.alpha), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    dot.alpha = 0.0;
-    if (!gHiddenDots) gHiddenDots = [NSMutableArray array];
-    [gHiddenDots addObject:dot];
-}
-
 static void DAORestoreDots(void) {
     for (UIView *d in gHiddenDots) {
         NSNumber *a = objc_getAssociatedObject(d, kDotAlpha);
