@@ -765,6 +765,8 @@ static void DAORestoreDots(void) {
 // 因为录屏和时钟/音乐可以同时各有一个容器（日志 817219872.6 就是这样）。
 static BOOL DAOHasTag(UIView *pill, NSString *token, NSInteger depth);
 static UIImageView *DAOArtworkInPill(UIView *pill, CGRect *visibleOut);
+static UIView *DAONativeRecordingIndicator(void);
+static UIView *DAOEnclosingHostFor(UIView *target, CGFloat side);
 
 static UIView *DAOPillForElement(NSString *token, BOOL *found) {
     if (found) *found = NO;
