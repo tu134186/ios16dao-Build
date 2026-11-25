@@ -15,7 +15,7 @@
 #import <math.h>
 #import <stdio.h>
 
-static NSString *const DAOVersion  = @"1.4.0";
+static NSString *const DAOVersion  = @"1.4.1";
 static const char *const DAONotify = "com.minis.ios16dao/changed";
 static NSString *const DAORoot     = @"/var/mobile/ios16dao";
 static NSString *const DAOLogPath  = @"/var/mobile/ios16dao.log";
@@ -709,6 +709,7 @@ static UIView *DAOPillWithArtwork(UIView *exclude) {
             ([ident containsString:@"axsContainer"] || [ident containsString:@"ScreenRecording"])) continue;
         CGRect vis = CGRectZero;
         if (!DAOArtworkInPill(p, &vis)) continue;
+        if (vis.size.width < 10.0 || vis.size.height < 10.0) continue;
         CGFloat score = vis.size.width * vis.size.height;
         if (score > bestScore) { bestScore = score; best = p; }
     }
@@ -1149,7 +1150,12 @@ static BOOL DAORefreshGeometryOnly(UIView *pill, CGRect pr, BOOL modeOn, BOOL ex
     for (int i = 0; i < 2; i++) {
         BOOL left = sides[i].left;
         DAOSpriteView *sp = left ? gLeftSprite : gRightSprite;
-        if (!sp || sp.hidden || !sp.superview) continue;
+        // 精灵不在屏上（被 Purge 藏起 / 换了宿主）→ 告诉调用方走完整重建，
+        // 否则「藏起来之后永远不再显示」。
+        if (!sp || sp.hidden || !sp.superview || !sp.window) {
+            if (sides[i].on) return NO;
+            continue;
+        }
         if (!sides[i].on) continue;
         CGFloat side = MIN(sides[i].size * h, 40.0);
         if (scale != 1.0) side = MIN(side * scale, 40.0);
@@ -1200,8 +1206,11 @@ static void DAOScan(BOOL verbose) {
     // 所以必须以 isCaptured 为硬门控，否则结束录屏后左边素材还挂着。
     UIView *recPill = captured ? DAOPillForElement(@"ScreenRecording", NULL) : nil;
     if (recPill) {
+        // morph 中间态：整屏宽度 + 超过 60pt 高。用比值不行 ——
+        // 正常宽录屏岛 172x36.67 比值 4.69，morph 态 407x84 比值 4.85，几乎一样。
         CGRect rr = DAOScreenRect(recPill);
-        if (rr.size.width > rr.size.height * 2.6) recPill = nil;  // morph 中间态，不算
+        CGFloat sw = [UIScreen mainScreen].bounds.size.width;
+        if (rr.size.height > 60.0 && rr.size.width > sw * 0.85) recPill = nil;
     }
     if (!recPill && captured) {
         BOOL exp = NO; UIView *only = DAOMainPill(&exp);
@@ -1212,7 +1221,8 @@ static void DAOScan(BOOL verbose) {
     UIView *musicPill = DAOPillWithArtwork(recPill);
     if (musicPill) {
         CGRect mr = DAOScreenRect(musicPill);
-        if (mr.size.width > mr.size.height * 2.6) musicPill = nil;
+        CGFloat sw = [UIScreen mainScreen].bounds.size.width;
+        if (mr.size.height > 60.0 && mr.size.width > sw * 0.85) musicPill = nil;
     }
 
     UIView *hostPill = recPill ?: musicPill;
@@ -1273,9 +1283,15 @@ static void DAOScan(BOOL verbose) {
                expanded, modeOn,
                (gLeftSprite && !gLeftSprite.hidden) ? NSStringFromCGRect(gLeftSprite.frame) : @"-",
                (gRightSprite && !gRightSprite.hidden) ? NSStringFromCGRect(gRightSprite.frame) : @"-");
-        for (UIView *p in DAOPills())
-            DAOLog(@"  pill id=%@ %@", p.accessibilityIdentifier ?: @"-",
-                   NSStringFromCGRect(DAOScreenRect(p)));
+        for (UIView *p in DAOPills()) {
+            CGRect art = CGRectZero;
+            UIImageView *iv = DAOArtworkInPill(p, &art);
+            DAOLog(@"  pill id=%@ %@ art=%@ %@",
+                   p.accessibilityIdentifier ?: @"-",
+                   NSStringFromCGRect(DAOScreenRect(p)),
+                   iv ? NSStringFromClass(iv.class) : @"none",
+                   iv ? NSStringFromCGRect(art) : @"-");
+        }
     }
     #undef DAO_CLEAR_ALL
 }
@@ -1372,8 +1388,8 @@ static void DAOObserve(void) {
                                                   usingBlock:^(__unused NSNotification *n) {
         DAOLog(@"capture -> %d", [UIScreen mainScreen].isCaptured);
         DAOScanSoon(0.08, YES);
-        DAOScanSoon(0.20, NO);
-        DAOScanSoon(0.35, NO);
+        DAOScanSoon(0.20, YES);
+        DAOScanSoon(0.35, YES);
         DAOScanSoon(0.60, NO);
         DAOScanSoon(0.95, NO);
     }];
@@ -1448,7 +1464,8 @@ static void DAOApplyNow(void) {
            DAOBool(@"aperture_particle_enabled", NO),
            (int)DAODouble(@"aperture_particle_style", 0, 0, 3),
            (unsigned long)(DAOArray(@"islandgv_excluded_apps").count));
-    @try { DAOPurge(); } @catch (...) {}
+    // 不在这里 Purge：Purge 会把精灵藏起来，而下面的快速路径又不会重新显示它，
+    // 结果就是「改任意一个设置 → 素材消失」。让 DAOScan 自己按需重建。
     DAOScan(NO);
 }
 
