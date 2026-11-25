@@ -1087,6 +1087,8 @@ static BOOL DAOMountSprite(BOOL left, UIView *pill, UIView *anchor,
     sp.hostView   = pill;
     sp.anchorView = anchor;
     sp.side       = side;
+    // anchor 分支在 sync 里已有 c.x += sp.xOffset，这里存原始偏移即可；
+    // 没有 anchor 时走端点公式，同样用它。
     sp.xOffset    = offset;
     sp.hidden     = NO;
     sp.alpha      = alpha;
