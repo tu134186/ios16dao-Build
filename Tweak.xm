@@ -15,7 +15,7 @@
 #import <math.h>
 #import <stdio.h>
 
-static NSString *const DAOVersion  = @"2.0.1";
+static NSString *const DAOVersion  = @"2.2.0";
 static const char *const DAONotify = "com.minis.ios16dao/changed";
 static NSString *const DAORoot     = @"/var/mobile/ios16dao";
 static NSString *const DAOLogPath  = @"/var/mobile/ios16dao.log";
@@ -1240,39 +1240,71 @@ static UIView *DAOElementContentView(UIView *elementView) {
 }
 
 // 把精灵挂成 contentView 的子视图：位置交给系统，尺寸随宿主自适应
+// 纯「寄生」式挂载：素材不自己算任何 frame，全部交给 Auto Layout。
+// 系统每次布局 SAUIElementView 时，会带着我们这几条约束一起算 ——
+// 岛放大、缩小、换边、morph 动画全部由系统驱动，我们只跟着走。
 static BOOL DAOMountIntoElement(UIView *elementView, BOOL left, CGFloat ratio, CGFloat offset, CGFloat alpha) {
     DAOSpriteView *sp = DAOSprite(left);
     UIView *host = DAOElementContentView(elementView);
     if (!sp || !host || !host.window) return NO;
 
-    DAOEnsureFrameLink();
     if (sp.superview != host) {
         [sp removeFromSuperview];
         [host addSubview:sp];
     }
     [host bringSubviewToFront:sp];
 
-    // 不做任何逐帧定位：自适应蒙版让系统改尺寸时它自己跟着变
-    sp.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    // side = 0 → sync 里直接 return，不再自己算 frame
     sp.hostView   = host;
     sp.anchorView = nil;
-    sp.side       = 0;                // 0 = 不自算 frame，用 bounds 铺满
+    sp.side       = 0;
     sp.xOffset    = 0;
+    sp.autoresizingMask = UIViewAutoresizingNone;
+    sp.translatesAutoresizingMaskIntoConstraints = NO;
 
-    CGRect b = host.bounds;
-    CGFloat side = MIN(b.size.width, b.size.height);
-    side = MIN(40.0, MAX(side * MAX(0.1, ratio) * MAX(0.4, 1.0), 6.0));
-    side = MIN(side, 40.0);
-    CGFloat inset = MAX(0.0, offset);
-    CGRect f = CGRectMake((b.size.width - side) / 2.0 + (left ? inset : -inset),
-                          (b.size.height - side) / 2.0, side, side);
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    sp.frame = f;
-    [CATransaction commit];
+    static const void *kDAOConstraints = &kDAOConstraints;
+    NSArray *oldCons = objc_getAssociatedObject(sp, kDAOConstraints);
+    if (oldCons.count) [NSLayoutConstraint deactivateConstraints:oldCons];
+
+    // 边长 = 宿主高度 × ratio（低优先级），上限 40 是硬约束（高优先级）。
+    // 这样 host 小的时候按 ratio 缩放，host 变大时被 40 截住 —— 正是原版 0x167b4 的行为。
+    NSLayoutConstraint *w = [sp.widthAnchor constraintEqualToAnchor:host.heightAnchor
+                                                        multiplier:MAX(0.1, ratio)];
+    w.priority = 750;
+    NSLayoutConstraint *cap = [sp.widthAnchor constraintLessThanOrEqualToConstant:40.0];
+    cap.priority = 999;
+    NSLayoutConstraint *h = [sp.heightAnchor constraintEqualToAnchor:sp.widthAnchor];
+    // 居中 + 水平偏移（正数 = 向该侧外移：左正右负）
+    NSLayoutConstraint *cx = [sp.centerXAnchor constraintEqualToAnchor:host.centerXAnchor
+                                                             constant:(left ? offset : -offset)];
+    NSLayoutConstraint *cy = [sp.centerYAnchor constraintEqualToAnchor:host.centerYAnchor];
+
+    NSArray *cons = @[ w, cap, h, cx, cy ];
+    [NSLayoutConstraint activateConstraints:cons];
+    objc_setAssociatedObject(sp, kDAOConstraints, cons, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    // 允许溢出宿主：宿主常常只比素材大几个点，裁了就看不到
+    host.clipsToBounds = NO;
+    if ([host isKindOfClass:[UIView class]]) host.layer.masksToBounds = NO;
 
     sp.hidden = NO;
     sp.alpha = alpha;
+
+    // 宿主若不参与 Auto Layout（某些 portal 叶子），约束不会生效 →
+    // 立刻检查一次尺寸，必要时退回手动居中，保证至少能看见。
+    [host layoutIfNeeded];
+    if (sp.frame.size.width < 1.0 || sp.frame.size.height < 1.0) {
+        [NSLayoutConstraint deactivateConstraints:cons];
+        objc_setAssociatedObject(sp, kDAOConstraints, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        sp.translatesAutoresizingMaskIntoConstraints = YES;
+        CGRect b = host.bounds;
+        CGFloat sd = MIN(40.0, MAX(6.0, MIN(b.size.width, b.size.height) * MAX(0.1, ratio)));
+        CGFloat cxv = b.size.width / 2.0 + (left ? offset : -offset);
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        sp.frame = CGRectMake(cxv - sd / 2.0, b.size.height / 2.0 - sd / 2.0, sd, sd);
+        [CATransaction commit];
+    }
     return YES;
 }
 
