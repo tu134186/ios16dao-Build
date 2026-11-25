@@ -15,7 +15,7 @@
 #import <math.h>
 #import <stdio.h>
 
-static NSString *const DAOVersion  = @"1.5.0";
+static NSString *const DAOVersion  = @"1.6.0";
 static const char *const DAONotify = "com.minis.ios16dao/changed";
 static NSString *const DAORoot     = @"/var/mobile/ios16dao";
 static NSString *const DAOLogPath  = @"/var/mobile/ios16dao.log";
@@ -231,6 +231,10 @@ static NSString *DAOFolderMediaPath(void) {
 @property (nonatomic, assign) CGFloat interval;      // 每帧秒数
 @property (nonatomic, assign) NSUInteger cursor;
 @property (nonatomic, assign) CFTimeInterval startedAt;
+@property (nonatomic, weak) UIView *hostPill;
+@property (nonatomic, assign) CGFloat sideFactor;
+@property (nonatomic, assign) CGFloat xOffset;
+@property (nonatomic, assign) BOOL isLeftSide;
 - (void)playFrames:(NSArray<UIImage *> *)frames interval:(CGFloat)interval;
 - (void)halt;
 @end
@@ -238,9 +242,32 @@ static NSString *DAOFolderMediaPath(void) {
 static NSMutableArray<DAOSpriteView *> *gAllSprites;
 static CADisplayLink *gFrameLink;
 
+// 跟随灵动岛的形变：容器在 morph 动画中用 bounds 会「落后一拍」，
+// 必须读 presentationLayer 的当前尺寸，素材才能和系统岛严丝合缝地一起放大缩小。
+static void DAOSyncSpriteFrame(DAOSpriteView *sp) {
+    UIView *pill = sp.hostPill;
+    if (!pill || !sp.superview) return;
+    CALayer *pl = pill.layer.presentationLayer ?: pill.layer;
+    CGSize sz = pl ? pl.bounds.size : pill.bounds.size;
+    CGFloat W = sz.width, H = sz.height;
+    if (W < 8 || H < 8) return;
+    CGFloat side = MIN(sp.sideFactor * H, 40.0);
+    if (side < 6.0) return;
+    CGFloat x = sp.isLeftSide ? sp.xOffset : (W - side - sp.xOffset);
+    CGFloat y = (H - side) / 2.0;
+    CGRect f = CGRectMake(x, y, side, side);
+    if (!CGRectEqualToRect(sp.frame, f)) {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        sp.frame = f;
+        [CATransaction commit];
+    }
+}
+
 static void DAOTickFrames(CADisplayLink *link) {
     CFTimeInterval now = link.timestamp;
     for (DAOSpriteView *sp in gAllSprites) {
+        DAOSyncSpriteFrame(sp);
         NSArray<UIImage *> *fr = sp.frames;
         if (!fr.count || sp.hidden || sp.interval <= 0.0) continue;
         NSUInteger idx = (NSUInteger)((now - sp.startedAt) / sp.interval);
@@ -1210,36 +1237,20 @@ static BOOL DAORefreshGeometryOnly(UIView *pill, CGRect pr, BOOL modeOn, BOOL ex
     for (int i = 0; i < 2; i++) {
         BOOL left = sides[i].left;
         DAOSpriteView *sp = left ? gLeftSprite : gRightSprite;
-        // 精灵不在屏上（被 Purge 藏起 / 换了宿主）→ 告诉调用方走完整重建，
+        // 精灵不在屏上（被 Purge 藏起 / 换了宿主）→ 让调用方走完整重建，
         // 否则「藏起来之后永远不再显示」。
         if (!sp || sp.hidden || !sp.superview || !sp.window) {
             if (sides[i].on) return NO;
             continue;
         }
         if (!sides[i].on) continue;
-        CGFloat side = MIN(sides[i].size * h, 40.0);
-        if (scale != 1.0) side = MIN(side * scale, 40.0);
-        CGFloat off = sides[i].off;
-        CGFloat x = left ? off : (pb.size.width - side - off);
-        CGRect f = CGRectMake(x, (h - side) / 2.0, side, side);
-        if (!CGRectEqualToRect(sp.frame, f)) {
-            CGFloat dw = fabs(sp.frame.size.width - f.size.width);
-            CGFloat dy = fabs(CGRectGetMidY(sp.frame) - CGRectGetMidY(f));
-            if (dw > 8.0 || dy > 8.0) {
-                [CATransaction begin];
-                [CATransaction setDisableActions:YES];
-                sp.frame = f;
-                [CATransaction commit];
-            } else {
-                [UIView animateWithDuration:0.16 delay:0
-                                    options:UIViewAnimationOptionBeginFromCurrentState |
-                                            UIViewAnimationOptionCurveEaseOut |
-                                            UIViewAnimationOptionAllowUserInteraction
-                                 animations:^{ sp.frame = f; }
-                                 completion:nil];
-            }
-        }
-        sp.alpha = alpha;
+        // 只更新参数；frame 由 displaylink 每帧读容器的 presentation layer 自动算，
+        // 这样系统做 morph 放大缩小时素材是同步跟随，不会落后一拍。
+        sp.hostPill   = pill;
+        sp.sideFactor = sides[i].size * scale;   // 比例并入，displaylink 统一算尺寸
+        sp.xOffset    = sides[i].off;
+        sp.isLeftSide = left;
+        sp.alpha      = alpha;
     }
     return YES;
 }
@@ -1261,10 +1272,13 @@ static void DAOScan(BOOL verbose) {
     // 同时存在。以前我「取最宽」→ 素材被塞进时钟容器，位置当然全错。
     BOOL captured = [UIScreen mainScreen].isCaptured;
 
-    // 录屏容器：identifier 命中还不够 —— 日志 817253973.7 证明「录屏已结束」时
-    // 容器的 ScreenRecording 标识会残留（展开成 407x84 的 morph 态），
-    // 所以必须以 isCaptured 为硬门控，否则结束录屏后左边素材还挂着。
-    UIView *recPill = captured ? DAOPillForElement(@"ScreenRecording", NULL) : nil;
+    // 录屏容器：只看「元素是否还在」+「尺寸是否正常」。
+    // 不能用 isCaptured 做硬门控 —— 暂停录屏时 isCaptured 立刻变 NO，
+    // 但录屏元素仍然挂在岛上（这正是「暂停后素材消失」的原因）。
+    // 真正区分「暂停」和「结束」的是元素本身：
+    //   暂停 → 元素在，容器仍是正常的 172x36.67
+    //   结束 → 元素被移除，中间会短暂处于 407x84 的 morph 态
+    UIView *recPill = DAOPillForElement(@"ScreenRecording", NULL);
     if (recPill) {
         // morph 中间态：整屏宽度 + 超过 60pt 高。用比值不行 ——
         // 正常宽录屏岛 172x36.67 比值 4.69，morph 态 407x84 比值 4.85，几乎一样。

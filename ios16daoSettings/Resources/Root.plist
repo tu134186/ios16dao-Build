@@ -542,6 +542,8 @@
 			<string>com.minis.ios16dao</string>
 			<key>format</key>
 			<string>%.2fs</string>
+			<key>invert</key>
+			<true/>
 			<key>key</key>
 			<string>islandgv_active_frame_interval</string>
 			<key>label</key>
@@ -552,6 +554,8 @@
 			<real>0.01</real>
 			<key>step</key>
 			<real>0.01</real>
+			<key>unit</key>
+			<string>s</string>
 		</dict>
 		<dict>
 			<key>PostNotification</key>

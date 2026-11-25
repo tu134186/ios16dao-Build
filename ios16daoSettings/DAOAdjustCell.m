@@ -61,6 +61,24 @@ static CFStringRef const kDAONotify = CFSTR("com.minis.ios16dao/changed");
     return v;
 }
 
+// 「invert」= 滑块方向取反：存储值仍是「每帧秒数」（0.01 快 / 0.2 慢，与原版一致），
+// 但界面上往右拖 = 更快，符合「帧率动画速度」这个名字的直觉。
+- (BOOL)inverted {
+    return [[self.specifier propertyForKey:@"invert"] boolValue];
+}
+
+- (float)sliderPosForStored:(float)v {
+    if (![self inverted]) return v;
+    float lo = self.slider.minimumValue, hi = self.slider.maximumValue;
+    return (lo + hi) - v;
+}
+
+- (float)storedForSliderPos:(float)v {
+    if (![self inverted]) return v;
+    float lo = self.slider.minimumValue, hi = self.slider.maximumValue;
+    return (lo + hi) - v;
+}
+
 - (void)reload {
     self.textLabel.text = self.specifier.name;
     self.textLabel.adjustsFontSizeToFitWidth = YES;
@@ -71,7 +89,7 @@ static CFStringRef const kDAONotify = CFSTR("com.minis.ios16dao/changed");
 
     float v = [self storedValue];
     v = fmaxf(self.slider.minimumValue, fminf(self.slider.maximumValue, v));
-    self.slider.value = v;
+    self.slider.value = [self sliderPosForStored:v];
     [self showValue];
 }
 
@@ -81,7 +99,17 @@ static CFStringRef const kDAONotify = CFSTR("com.minis.ios16dao/changed");
         CGFloat mx = self.slider.maximumValue;
         fmt = mx <= 1.0 ? @"%.0f%%" : (mx <= 2.0 ? @"%.2fx" : @"%.0f");
     }
-    float v = self.slider.value;
+    float stored = [self storedForSliderPos:self.slider.value];
+    float v;
+    if ([[self.specifier propertyForKey:@"unit"] isEqualToString:@"s"] && stored > 0.0) {
+        // 秒/帧 → 同时显示等效帧率，最直观
+        v = stored;
+        NSString *unit = [self.specifier propertyForKey:@"unit"];
+        self.valueLabel.text = [NSString stringWithFormat:@"%.2fs(%.0ffps)", v, 1.0 / MAX(0.001, v)];
+        (void)unit;
+        return;
+    }
+    v = stored;
     if ([fmt containsString:@"%%"]) {
         self.valueLabel.text = [NSString stringWithFormat:fmt, v * 100.0];
     } else {
@@ -120,8 +148,9 @@ static CFStringRef const kDAONotify = CFSTR("com.minis.ios16dao/changed");
 - (void)save {
     NSString *key = [self.specifier propertyForKey:@"key"];
     if (!key) return;
+    float stored = [self storedForSliderPos:self.slider.value];
     CFPreferencesSetAppValue((__bridge CFStringRef)key,
-                             (__bridge CFPropertyListRef)@(self.slider.value),
+                             (__bridge CFPropertyListRef)@(stored),
                              (__bridge CFStringRef)kDAODomain);
     CFPreferencesAppSynchronize((__bridge CFStringRef)kDAODomain);
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
