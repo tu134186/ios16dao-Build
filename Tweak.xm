@@ -15,7 +15,7 @@
 #import <math.h>
 #import <stdio.h>
 
-static NSString *const DAOVersion  = @"1.8.0";
+static NSString *const DAOVersion  = @"2.0.0";
 static const char *const DAONotify = "com.minis.ios16dao/changed";
 static NSString *const DAORoot     = @"/var/mobile/ios16dao";
 static NSString *const DAOLogPath  = @"/var/mobile/ios16dao.log";
@@ -246,24 +246,28 @@ static CADisplayLink *gFrameLink;
 // 必须读 presentationLayer 的当前尺寸，素材才能和系统岛严丝合缝地一起放大缩小。
 static void DAOSyncSpriteFrame(DAOSpriteView *sp) {
     UIView *host = sp.hostView;
-    UIView *anchor = sp.anchorView;
-    if (!host || !anchor || sp.superview != host || !host.window) return;
+    if (!host || sp.superview != host || !host.window) return;
     if (sp.side < 6.0) return;
 
-    // 用 presentation layer 读动画中的真实位置：系统的 morph 动画进行到哪，
-    // 素材就跟到哪，天然同步、零延迟（这是「像原装一样」的关键）。
+    // 容器尺寸一律读 presentation：系统 morph 动画进行到哪，素材就跟到哪。
+    CALayer *hl = (CALayer *)host.layer.presentationLayer ?: host.layer;
+    CGSize hb = hl ? hl.bounds.size : host.bounds.size;
+    if (hb.width < 8 || hb.height < 8) return;
+
     CGPoint c = CGPointZero;
     BOOL ok = NO;
-    @try {
-        CALayer *al = (CALayer *)anchor.layer.presentationLayer ?: anchor.layer;
-        CALayer *hl = (CALayer *)host.layer.presentationLayer ?: host.layer;
-        CGPoint local = CGPointMake(CGRectGetMidX(al.bounds), CGRectGetMidY(al.bounds));
-        c = [al convertPoint:local toLayer:hl];
-        ok = isfinite(c.x) && isfinite(c.y);
-    } @catch (...) {}
+    UIView *anchor = sp.anchorView;
+    if (anchor && anchor.superview && anchor.window) {
+        @try {
+            CALayer *al = (CALayer *)anchor.layer.presentationLayer ?: anchor.layer;
+            CGPoint local = CGPointMake(CGRectGetMidX(al.bounds), CGRectGetMidY(al.bounds));
+            c = [al convertPoint:local toLayer:hl];
+            ok = isfinite(c.x) && isfinite(c.y);
+        } @catch (...) {}
+    }
     if (!ok) {
-        @try { c = [anchor convertPoint:anchor.center fromView:anchor.superview]; }
-        @catch (...) { return; }
+        // 没有锚点：贴容器端点（原版 0x167b4 的做法）
+        c = CGPointMake(sp.xOffset + sp.side / 2.0, hb.height / 2.0);
     }
     c.x += sp.xOffset;
     CGRect f = CGRectMake(c.x - sp.side / 2.0, c.y - sp.side / 2.0, sp.side, sp.side);
@@ -962,7 +966,7 @@ static DAOMediaView *DAOMedia(BOOL left) {
 static void DAOHideSprite(BOOL left) {
     __strong DAOSpriteView **s = left ? &gLeftSprite : &gRightSprite;
     __strong DAOMediaView **m = left ? &gLeftMedia : &gRightMedia;
-    if (*s) { [(*s) halt]; (*s).hidden = YES; }
+    if (*s) { [(*s) halt]; (*s).hidden = YES; (*s).anchorView = nil; }
     if (*m) { [(*m) halt]; (*m).hidden = YES; }
 }
 
@@ -1046,37 +1050,30 @@ static UIView *DAOEnclosingHostFor(UIView *target, CGFloat side) {
 }
 
 // 素材挂载：host = 元素内部足够大的视图；圆心 = 红点/封面 的实时中心。
+// 挂载：宿主固定为灵动岛容器（容器一定在窗口里、不会被小 portal 裁掉），
+// 圆心则由 anchor（红点/封面）的 presentation 中心决定。
+// 之前把精灵挂到「往上找的大宿主」，那层常常是离屏 portal 叶子，导致素材算出了
+// 位置却看不见 —— 日志里 eye={33,33} 有值但屏幕上没有，就是这个原因。
 static BOOL DAOMountSprite(BOOL left, UIView *pill, UIView *anchor,
                            CGFloat side, CGFloat offset, CGFloat alpha) {
     DAOSpriteView *sp = DAOSprite(left);
-    if (!sp) return NO;
-    if (!anchor || !anchor.superview || !anchor.window) { DAOHideSprite(left); return NO; }
+    if (!sp || !pill || !pill.window) return NO;
+    if (anchor && !anchor.superview) anchor = nil;
 
     side = MAX(6.0, MIN(side, 40.0));
-    UIView *host = DAOEnclosingHostFor(anchor, side);
-    if (!host || !host.window) { DAOHideSprite(left); return NO; }
-
     DAOEnsureFrameLink();
-    if (sp.superview != host) {
+    if (sp.superview != pill) {
         [sp removeFromSuperview];
-        [host addSubview:sp];
+        [pill addSubview:sp];
     }
-    [host bringSubviewToFront:sp];
-    sp.hostView = host;
+    [pill bringSubviewToFront:sp];
+    sp.hostView   = pill;
     sp.anchorView = anchor;
-    sp.side = side;
-    sp.xOffset = offset;
-
-    // 立刻按当前（非动画）位置落一帧，之后由 displaylink 每帧跟 presentation
-    CGPoint c = CGPointZero;
-    @try { c = [host convertPoint:anchor.center fromView:anchor.superview]; } @catch (...) {}
-    if (isfinite(c.x) && isfinite(c.y)) {
-        [UIView performWithoutAnimation:^{
-            sp.frame = CGRectMake(c.x + offset - side / 2.0, c.y - side / 2.0, side, side);
-        }];
-    }
-    sp.hidden = NO;
-    sp.alpha = alpha;
+    sp.side       = side;
+    sp.xOffset    = offset;
+    sp.hidden     = NO;
+    sp.alpha      = alpha;
+    DAOSyncSpriteFrame(sp);      // 立刻落一帧
     return YES;
 }
 
@@ -1198,6 +1195,118 @@ static BOOL DAOPlaceSide(BOOL left, UIView *pill, CGRect pillRect,
 // 不会慢一拍；暂停录屏时红点元素仍在，素材也不会消失。
 
 static __weak UIView *gDAOCapturedDot;
+
+#pragma mark - 官方元素结构挂载（依据 iOS 16.5 SystemApertureUI 头文件）
+//
+// iOS 16.5 的 SystemApertureUI 导出的真实结构：
+//   SAUIElementView
+//     .contentView            内容视图
+//     .minimalTransformView   _SAUIProvidedViewContainerView  最小态
+//     .leadingTransformView   _SAUIProvidedViewContainerView  左端点
+//     .trailingTransformView  _SAUIProvidedViewContainerView  右端点
+//        └ .providedView      App 提供的内容（真正该挂的地方）
+//        └ .portalView        _SAUIPortalView
+//
+// Apple 自己在系统里就是这么放 App 内容的。把素材做成 providedView 的子视图，
+// 放大/缩小/换边/动画全部由系统接管 —— 这才是「像原装一样」的唯一做法。
+// 之前我在容器外面手算 bounds，永远跟不上系统的 morph。
+
+static NSString *DAOElementIdentity(UIView *elementView) {
+    NSMutableString *out = [NSMutableString string];
+    id prov = nil;
+    @try { prov = [elementView valueForKey:@"elementViewProvider"]; } @catch (...) {}
+    for (NSString *k in @[@"clientIdentifier", @"elementIdentifier", @"identifier", @"elementDescription"]) {
+        NSString *v = nil;
+        @try { v = [prov valueForKey:k]; } @catch (...) {}
+        if (![v isKindOfClass:[NSString class]]) {
+            @try { v = [elementView valueForKey:k]; } @catch (...) {}
+        }
+        if ([v isKindOfClass:[NSString class]] && v.length) [out appendFormat:@"%@ ", v];
+    }
+    return out;
+}
+
+// 取元素当前「可见」的那个 transform 视图里的 providedView
+static UIView *DAOElementContentView(UIView *elementView) {
+    if (!elementView) return nil;
+    UIView *best = nil; CGFloat bestArea = 0;
+    for (NSString *key in @[@"leadingTransformView", @"trailingTransformView", @"minimalTransformView"]) {
+        UIView *tv = nil;
+        @try { tv = [elementView valueForKey:key]; } @catch (...) {}
+        if (!tv || tv.hidden || !tv.window) continue;
+        CGRect r = DAOScreenRect(tv);
+        if (r.size.width < 4 || r.size.height < 4) continue;
+        CGFloat area = r.size.width * r.size.height;
+        CGFloat side = MIN(r.size.width, r.size.height) / MAX(r.size.width, r.size.height);
+        // 端点视图应该是接近方形或窄长的胶囊；太扁的（整屏 morph 中间态）降权
+        CGFloat score = area * (side < 0.12 ? 0.2 : 1.0);
+        if (score > bestArea) { bestArea = score; best = tv; }
+    }
+    UIView *target = best;
+    if (target) {
+        UIView *pv = nil;
+        @try { pv = [target valueForKey:@"providedView"]; } @catch (...) {}
+        if (pv && pv.window && pv.bounds.size.width >= 4) return pv;
+        return target;
+    }
+    UIView *cv = nil;
+    @try { cv = [elementView valueForKey:@"contentView"]; } @catch (...) {}
+    if (cv && cv.window) return cv;
+    return nil;
+}
+
+// 把精灵挂成 contentView 的子视图：位置交给系统，尺寸随宿主自适应
+static BOOL DAOMountIntoElement(UIView *elementView, BOOL left, CGFloat ratio, CGFloat offset, CGFloat alpha) {
+    DAOSpriteView *sp = DAOSprite(left);
+    UIView *host = DAOElementContentView(elementView);
+    if (!sp || !host || !host.window) return NO;
+
+    DAOEnsureFrameLink();
+    if (sp.superview != host) {
+        [sp removeFromSuperview];
+        [host addSubview:sp];
+    }
+    [host bringSubviewToFront:sp];
+
+    // 不做任何逐帧定位：自适应蒙版让系统改尺寸时它自己跟着变
+    sp.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    sp.hostView   = host;
+    sp.anchorView = nil;
+    sp.side       = 0;                // 0 = 不自算 frame，用 bounds 铺满
+    sp.xOffset    = 0;
+
+    CGRect b = host.bounds;
+    CGFloat side = MIN(b.size.width, b.size.height);
+    side = MIN(40.0, MAX(side * MAX(0.1, ratio) * MAX(0.4, 1.0), 6.0));
+    side = MIN(side, 40.0);
+    CGFloat inset = MAX(0.0, offset);
+    CGRect f = CGRectMake((b.size.width - side) / 2.0 + (left ? inset : -inset),
+                          (b.size.height - side) / 2.0, side, side);
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    sp.frame = f;
+    [CATransaction commit];
+
+    sp.hidden = NO;
+    sp.alpha = alpha;
+    return YES;
+}
+
+static NSArray<UIView *> *DAOElementViews(void) {
+    NSMutableArray<UIView *> *out = [NSMutableArray array];
+    NSMutableArray<UIView *> *stack = [NSMutableArray array];
+    for (UIWindow *w in DAOAllWindows()) [stack addObject:w];
+    NSInteger guard = 0;
+    Class cls = NSClassFromString(@"SAUIElementView");
+    while (stack.count && guard++ < 6000) {
+        UIView *v = stack.lastObject; [stack removeLastObject];
+        BOOL match = cls ? [v isKindOfClass:cls]
+                         : [NSStringFromClass(v.class) isEqualToString:@"SAUIElementView"];
+        if (match && v.window && !v.hidden && v.alpha > 0.01) [out addObject:v];
+        for (UIView *sub in v.subviews) if (sub) [stack addObject:sub];
+    }
+    return out;
+}
 
 static BOOL DAOLooksLikeIndicator(UIView *v) {
     if (!v) return NO;
@@ -1447,6 +1556,59 @@ static void DAOScan(BOOL verbose) {
     // 日志证据（817219872.6）：录屏容器 36.66pt 在 x=285，时钟容器 163pt 在 x=114，
     // 同时存在。以前我「取最宽」→ 素材被塞进时钟容器，位置当然全错。
     BOOL captured = [UIScreen mainScreen].isCaptured;
+
+    // ── 优先走官方元素结构 ───────────────────────────────────────
+    // 每个 SAUIElementView 自带 leading/trailing/minimal 三个 providedView 容器，
+    // 把素材挂进当前可见的那个，系统会自己负责缩放和换边。
+    {
+        NSArray<UIView *> *els = DAOElementViews();
+        UIView *recEl = nil, *musEl = nil;
+        for (UIView *el in els) {
+            NSString *ident = DAOElementIdentity(el);
+            NSString *low = ident.lowercaseString;
+            if ([low containsString:@"screenrecording"] || [low containsString:@"replaykit"]) {
+                if (!recEl) recEl = el;
+            } else {
+                CGRect vis = CGRectZero;
+                if (DAOArtworkInPill(el, &vis) && !musEl) musEl = el;
+            }
+        }
+        BOOL modeOnEl = DAOExpandedOn() || DAOPillOn();
+        CGFloat alphaEl = DAODouble(@"islandgv_alpha", 1.0, 0.0, 1.0);
+        BOOL leftOn  = modeOnEl && DAOBool(@"islandgv_active_custom_album", NO) && recEl;
+        BOOL rightOn = modeOnEl && DAOBool(@"islandgv_active_custom_dance", NO) && musEl;
+        if (leftOn || rightOn) {
+            BOOL okL = leftOn ? DAOMountIntoElement(recEl, YES,
+                        DAODouble(@"islandgv_active_left_size", 0.9, 0.6, 2.0),
+                        DAODouble(@"islandgv_active_left_offset", 1.5, -10.0, 10.0), alphaEl) : NO;
+            BOOL okR = rightOn ? DAOMountIntoElement(musEl, NO,
+                        DAODouble(@"islandgv_active_right_size", 0.9, 0.6, 2.0),
+                        DAODouble(@"islandgv_active_right_offset", 1.5, -10.0, 10.0), alphaEl) : NO;
+            if (!leftOn) DAOHideSprite(YES);
+            if (!rightOn) DAOHideSprite(NO);
+            if (okL || okR) {
+                NSArray<UIImage *> *frL = okL ? DAOLoadFrames(1) : nil;
+                NSArray<UIImage *> *frR = okR ? DAOLoadFrames(0) : nil;
+                CGFloat iv = DAODouble(@"islandgv_active_frame_interval", 0.1, 0.01, 0.2);
+                if (frL.count) [gLeftSprite playFrames:frL interval:iv];
+                if (frR.count) [gRightSprite playFrames:frR interval:iv];
+                gSnapshot = DAOCurrentConfig();
+                if (verbose) {
+                    DAOLog(@"element mount rec=%@ music=%@ eye=%@ dance=%@",
+                           recEl ? DAOElementIdentity(recEl) : @"-",
+                           musEl ? DAOElementIdentity(musEl) : @"-",
+                           (gLeftSprite && !gLeftSprite.hidden) ? NSStringFromCGRect(gLeftSprite.frame) : @"-",
+                           (gRightSprite && !gRightSprite.hidden) ? NSStringFromCGRect(gRightSprite.frame) : @"-");
+                }
+                // 光圈仍按容器矩形走（它描的是岛的轮廓，不是元素内容）
+                @try {
+                    UIView *ap = recEl ?: musEl;
+                    if (ap) DAOAttachAperture(ap, YES);
+                } @catch (...) {}
+                return;
+            }
+        }
+    }
 
     // 录屏容器：只看「元素是否还在」+「尺寸是否正常」。
     // 不能用 isCaptured 做硬门控 —— 暂停录屏时 isCaptured 立刻变 NO，
