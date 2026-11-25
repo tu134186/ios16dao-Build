@@ -1126,6 +1126,7 @@ static void DAOAttachAperture(UIView *pill, BOOL expanded) {
 }
 
 static BOOL DAORefreshGeometryOnly(UIView *pill, CGRect pr, BOOL modeOn, BOOL expanded);
+static void DAOPurge(void);
 
 // 配置没变时走的轻量路径：只把已有视图的 frame 跟着岛更新，
 // 不调用 play/halt、不 addSubview/removeFromSuperview —— 这是原版的流畅来源。
