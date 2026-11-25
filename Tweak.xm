@@ -1115,7 +1115,15 @@ static BOOL DAOPlaceSide(BOOL left, UIView *pill, CGRect pillRect,
         return DAOMountSprite(left, pill, anchor, side, offset, alpha);
     }
 
-    // 没有锚点（红点还没生成 / 没有封面）：退回容器端点摆放
+    // 没有锚点（红点还没生成 / 封面还没出来）：优先用元素内部的 provided container，
+    // 它就在岛里、会跟着 morph 一起动；实在没有才退回容器端点。
+    UIView *provided = DAOProvidedContainer(pill, 6);
+    if (provided && provided.window) {
+        CGFloat hh = pill.bounds.size.height;
+        return DAOMountSprite(left, pill, provided, side, offset, alpha);
+        (void)hh;
+    }
+
     CGFloat x = left ? offset : (W - side - offset);
     CGFloat y = (H - side) / 2.0;
     CGRect frame = CGRectMake(x, y, side, side);
