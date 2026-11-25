@@ -767,6 +767,7 @@ static BOOL DAOHasTag(UIView *pill, NSString *token, NSInteger depth);
 static UIImageView *DAOArtworkInPill(UIView *pill, CGRect *visibleOut);
 static UIView *DAONativeRecordingIndicator(void);
 static UIView *DAOEnclosingHostFor(UIView *target, CGFloat side);
+static UIView *DAOProvidedContainer(UIView *element, NSInteger depth);
 
 static UIView *DAOPillForElement(NSString *token, BOOL *found) {
     if (found) *found = NO;
