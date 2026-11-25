@@ -1193,8 +1193,8 @@ static void DAOScan(BOOL verbose) {
         DAORestoreArtwork(); DAORestoreDots(); DAORestoreAll(); \
     } while (0)
 
-    if (!DAOAnyOn() && !DAOBool(@"aperture_enabled", NO)) { DAO_CLEAR_ALL(); return; }
-    if (DAOAppExcluded()) { DAO_CLEAR_ALL(); return; }
+    if (!DAOAnyOn() && !DAOBool(@"aperture_enabled", NO)) { DAOPurge(); return; }
+    if (DAOAppExcluded()) { DAOPurge(); return; }
 
     // ── 关键：按元素各自找容器 ─────────────────────────────────
     // 日志证据（817219872.6）：录屏容器 36.66pt 在 x=285，时钟容器 163pt 在 x=114，
