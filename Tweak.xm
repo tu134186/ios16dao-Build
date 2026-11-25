@@ -15,7 +15,7 @@
 #import <math.h>
 #import <stdio.h>
 
-static NSString *const DAOVersion  = @"1.6.0";
+static NSString *const DAOVersion  = @"1.7.0";
 static const char *const DAONotify = "com.minis.ios16dao/changed";
 static NSString *const DAORoot     = @"/var/mobile/ios16dao";
 static NSString *const DAOLogPath  = @"/var/mobile/ios16dao.log";
@@ -1012,6 +1012,32 @@ static BOOL DAOPlaceSide(BOOL left, UIView *pill, CGRect pillRect,
     CGFloat y = (H - side) / 2.0;
     CGRect frame = CGRectMake(x, y, side, side);
 
+    // ── 左侧（录屏）：挂在岛容器里（不会被 22x22 的 portal 裁掉），
+    // 但**圆心跟随系统红点**。挂载点选容器、定位用红点 —— 两者结合：
+    //   · 挂容器 → 素材尺寸自由，不被小 portal 裁切
+    //   · 圆心跟红点 → 系统 morph 时位置天然正确，暂停录屏也不会消失
+    UIView *dot = left ? DAONativeRecordingIndicator() : nil;
+    CGPoint dotCenter = CGPointZero;
+    BOOL haveDot = NO;
+    if (dot && dot.window && dot.superview) {
+        @try {
+            dotCenter = [pill convertPoint:dot.center fromView:dot.superview];
+            haveDot = isfinite(dotCenter.x) && isfinite(dotCenter.y);
+        } @catch (...) {}
+    }
+    CGFloat eyeSide = MIN(sideFactor * H, 40.0);
+    if (scale != 1.0) eyeSide = MIN(eyeSide * scale, 40.0);
+    if (haveDot) {
+        // 至少比红点大一点，才能完全盖住
+        CGFloat dm = MAX(CGRectGetWidth(dot.bounds), CGRectGetHeight(dot.bounds));
+        eyeSide = MAX(eyeSide, dm * 1.15);
+        eyeSide = MIN(MAX(eyeSide, 6.0), 40.0);
+        CGFloat half = eyeSide / 2.0;
+        dotCenter.x = MAX(half - H * 0.5, MIN(W - half + H * 0.5, dotCenter.x + offset));
+        dotCenter.y = MAX(half - H * 0.5, MIN(H + half, dotCenter.y));
+        frame = CGRectMake(dotCenter.x - half, dotCenter.y - half, eyeSide, eyeSide);
+    }
+
     // 帧间隔：原版 islandgv_active_frame_interval（0.01~0.2s，是「每帧时长」不是 fps）
     CGFloat interval = DAODouble(@"islandgv_active_frame_interval", 0.1, 0.01, 0.2);
     // ────────────────────────────────────────────────────────────
@@ -1073,6 +1099,66 @@ static BOOL DAOPlaceSide(BOOL left, UIView *pill, CGRect pillRect,
     if (sp.startedAt <= 0) sp.startedAt = CACurrentMediaTime();
     [sp playFrames:frames interval:interval];
     return YES;
+}
+
+#pragma mark - 原生录屏红点捕获（移植自 RecordingSharingan 6.20 已验证实现）
+//
+// 关键思路：素材不再按容器 bounds 自己算 frame，而是挂到「系统红点自己的
+// superview」里、圆心对准红点中心。这样系统的 morph 动画天然带着素材一起走，
+// 不会慢一拍；暂停录屏时红点元素仍在，素材也不会消失。
+
+static __weak UIView *gDAOCapturedDot;
+
+static BOOL DAOLooksLikeIndicator(UIView *v) {
+    if (!v) return NO;
+    Class cls = NSClassFromString(@"SBRecordingIndicatorView");
+    if (cls) { if (![v isKindOfClass:cls]) return NO; }
+    else if (![NSStringFromClass(v.class) isEqualToString:@"SBRecordingIndicatorView"]) return NO;
+
+    CGFloat w = CGRectGetWidth(v.bounds), h = CGRectGetHeight(v.bounds);
+    // 真机确认：有效红点约 5.67x5.67，0x0 是占位实例
+    if (!(w >= 3.0 && h >= 3.0 && w <= 12.0 && h <= 12.0)) return NO;
+    if (!v.superview) return NO;
+
+    Class winCls = NSClassFromString(@"SBRecordingIndicatorWindow");
+    if (winCls) return [v.window isKindOfClass:winCls];
+    return [NSStringFromClass(v.window.class) isEqualToString:@"SBRecordingIndicatorWindow"];
+}
+
+static UIView *DAONativeRecordingIndicator(void) {
+    Class cls = NSClassFromString(@"SBRecordingIndicatorView");
+    Class winCls = NSClassFromString(@"SBRecordingIndicatorWindow");
+    UIView *best = nil;
+    for (UIWindow *w in DAOAllWindows()) {
+        BOOL isRecWin = winCls ? [w isKindOfClass:winCls]
+                               : [NSStringFromClass(w.class) isEqualToString:@"SBRecordingIndicatorWindow"];
+        if (!isRecWin) continue;
+        NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:w];
+        NSInteger guard = 0;
+        while (stack.count && guard++ < 220) {
+            UIView *v = stack.lastObject; [stack removeLastObject];
+            BOOL match = cls ? [v isKindOfClass:cls]
+                             : [NSStringFromClass(v.class) isEqualToString:@"SBRecordingIndicatorView"];
+            if (match && DAOLooksLikeIndicator(v) && !best) best = v;
+            for (UIView *sub in [v.subviews copy]) if (sub) [stack addObject:sub];
+        }
+    }
+    if (DAOLooksLikeIndicator(gDAOCapturedDot)) return gDAOCapturedDot;
+    if (best) gDAOCapturedDot = best;
+    return best;
+}
+
+// 兜底宿主：元素内部的 _SAUIProvidedViewContainerView（原版也是挂在这一层里）
+static UIView *DAOProvidedContainer(UIView *element, NSInteger depth) {
+    if (!element) return nil;
+    Class c = NSClassFromString(@"_SAUIProvidedViewContainerView");
+    if (c && [element isKindOfClass:c]) return element;
+    if (depth <= 0) return nil;
+    for (UIView *sub in [element.subviews copy]) {
+        UIView *found = DAOProvidedContainer(sub, depth - 1);
+        if (found) return found;
+    }
+    return nil;
 }
 
 static UIImageView *DAOArtworkInPill(UIView *pill, CGRect *visibleOut) {
