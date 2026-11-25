@@ -15,7 +15,7 @@
 #import <math.h>
 #import <stdio.h>
 
-static NSString *const DAOVersion  = @"1.7.0";
+static NSString *const DAOVersion  = @"1.8.0";
 static const char *const DAONotify = "com.minis.ios16dao/changed";
 static NSString *const DAORoot     = @"/var/mobile/ios16dao";
 static NSString *const DAOLogPath  = @"/var/mobile/ios16dao.log";
@@ -231,10 +231,10 @@ static NSString *DAOFolderMediaPath(void) {
 @property (nonatomic, assign) CGFloat interval;      // 每帧秒数
 @property (nonatomic, assign) NSUInteger cursor;
 @property (nonatomic, assign) CFTimeInterval startedAt;
-@property (nonatomic, weak) UIView *hostPill;
-@property (nonatomic, assign) CGFloat sideFactor;
+@property (nonatomic, weak) UIView *hostView;   // 挂载宿主（元素内部的视图）
+@property (nonatomic, weak) UIView *anchorView; // 对齐目标：红点 / 专辑封面
+@property (nonatomic, assign) CGFloat side;     // 边长
 @property (nonatomic, assign) CGFloat xOffset;
-@property (nonatomic, assign) BOOL isLeftSide;
 - (void)playFrames:(NSArray<UIImage *> *)frames interval:(CGFloat)interval;
 - (void)halt;
 @end
@@ -245,17 +245,28 @@ static CADisplayLink *gFrameLink;
 // 跟随灵动岛的形变：容器在 morph 动画中用 bounds 会「落后一拍」，
 // 必须读 presentationLayer 的当前尺寸，素材才能和系统岛严丝合缝地一起放大缩小。
 static void DAOSyncSpriteFrame(DAOSpriteView *sp) {
-    UIView *pill = sp.hostPill;
-    if (!pill || !sp.superview) return;
-    CALayer *pl = pill.layer.presentationLayer ?: pill.layer;
-    CGSize sz = pl ? pl.bounds.size : pill.bounds.size;
-    CGFloat W = sz.width, H = sz.height;
-    if (W < 8 || H < 8) return;
-    CGFloat side = MIN(sp.sideFactor * H, 40.0);
-    if (side < 6.0) return;
-    CGFloat x = sp.isLeftSide ? sp.xOffset : (W - side - sp.xOffset);
-    CGFloat y = (H - side) / 2.0;
-    CGRect f = CGRectMake(x, y, side, side);
+    UIView *host = sp.hostView;
+    UIView *anchor = sp.anchorView;
+    if (!host || !anchor || sp.superview != host || !host.window) return;
+    if (sp.side < 6.0) return;
+
+    // 用 presentation layer 读动画中的真实位置：系统的 morph 动画进行到哪，
+    // 素材就跟到哪，天然同步、零延迟（这是「像原装一样」的关键）。
+    CGPoint c = CGPointZero;
+    BOOL ok = NO;
+    @try {
+        CALayer *al = (CALayer *)anchor.layer.presentationLayer ?: anchor.layer;
+        CALayer *hl = (CALayer *)host.layer.presentationLayer ?: host.layer;
+        CGPoint local = CGPointMake(CGRectGetMidX(al.bounds), CGRectGetMidY(al.bounds));
+        c = [al convertPoint:local toLayer:hl];
+        ok = isfinite(c.x) && isfinite(c.y);
+    } @catch (...) {}
+    if (!ok) {
+        @try { c = [anchor convertPoint:anchor.center fromView:anchor.superview]; }
+        @catch (...) { return; }
+    }
+    c.x += sp.xOffset;
+    CGRect f = CGRectMake(c.x - sp.side / 2.0, c.y - sp.side / 2.0, sp.side, sp.side);
     if (!CGRectEqualToRect(sp.frame, f)) {
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
@@ -779,6 +790,33 @@ static UIView *DAOPillForElement(NSString *token, BOOL *found) {
 // 音乐岛：系统在音乐播放时容器 identifier 里并没有 "NowPlaying"（实测日志只有
 // jindo-container-view:N），所以改用「容器内存在方形封面图」来判定，
 // 这也正好对应原版 IOS16DAOActiveAlbumView 的 artworkView。
+// 在 SAUIElementView 元素里找带封面的那个，返回它所在的容器。
+// 独立岛（音乐分离岛）刚出现时，容器可能还没被系统登记，但元素已经有了。
+static UIView *DAOElementPillWithArtwork(UIView *exclude) {
+    UIView *best = nil;
+    NSMutableArray<UIView *> *stack = [NSMutableArray array];
+    for (UIWindow *w in DAOAllWindows()) [stack addObject:w];
+    NSInteger guard = 0;
+    while (stack.count && guard++ < 4000) {
+        UIView *v = stack.lastObject; [stack removeLastObject];
+        if ([NSStringFromClass(v.class) isEqualToString:@"SAUIElementView"] && v.window && !v.hidden) {
+            if (!(exclude && v == exclude)) {
+                CGRect vis = CGRectZero;
+                if (DAOArtworkInPill(v, &vis)) {
+                    // 返回它最近的 SBSystemApertureContainerView，没有就用元素本身
+                    UIView *p = v;
+                    for (int i = 0; p && i < 8; i++, p = p.superview) {
+                        if ([NSStringFromClass(p.class) containsString:@"SBSystemApertureContainerView"]) break;
+                    }
+                    if (p && p.window) best = p;
+                }
+            }
+        }
+        for (UIView *sub in v.subviews) [stack addObject:sub];
+    }
+    return best;
+}
+
 static UIView *DAOPillWithArtwork(UIView *exclude) {
     UIView *best = nil; CGFloat bestScore = -1;
     for (UIView *p in DAOPills()) {
@@ -990,6 +1028,55 @@ static void DAOReparent(UIView *v, UIView *host) {
     [host bringSubviewToFront:v];
 }
 
+// 从 target 往上找第一个「尺寸足够容纳 side」的祖先视图作为挂载宿主。
+// 为什么要往上找：红点/封面所在的叶子视图往往很小（红点宿主实测 22x22），
+// 直接把 33~40pt 的素材塞进去会被裁掉；往上找到够大的那一层，既不会裁，
+// 又仍然在元素内部 —— 系统 morph 时素材跟着父视图一起动，像原装一样。
+static UIView *DAOEnclosingHostFor(UIView *target, CGFloat side) {
+    if (!target) return nil;
+    UIView *v = target.superview;
+    for (int i = 0; v && i < 14; i++, v = v.superview) {
+        CGSize b = v.bounds.size;
+        if (b.width >= side * 0.92 && b.height >= side * 0.92) return v;
+    }
+    return target.superview;
+}
+
+// 素材挂载：host = 元素内部足够大的视图；圆心 = 红点/封面 的实时中心。
+static BOOL DAOMountSprite(BOOL left, UIView *pill, UIView *anchor,
+                           CGFloat side, CGFloat offset, CGFloat alpha) {
+    DAOSpriteView *sp = DAOSprite(left);
+    if (!sp) return NO;
+    if (!anchor || !anchor.superview || !anchor.window) { DAOHideSprite(left); return NO; }
+
+    side = MAX(6.0, MIN(side, 40.0));
+    UIView *host = DAOEnclosingHostFor(anchor, side);
+    if (!host || !host.window) { DAOHideSprite(left); return NO; }
+
+    DAOEnsureFrameLink();
+    if (sp.superview != host) {
+        [sp removeFromSuperview];
+        [host addSubview:sp];
+    }
+    [host bringSubviewToFront:sp];
+    sp.hostView = host;
+    sp.anchorView = anchor;
+    sp.side = side;
+    sp.xOffset = offset;
+
+    // 立刻按当前（非动画）位置落一帧，之后由 displaylink 每帧跟 presentation
+    CGPoint c = CGPointZero;
+    @try { c = [host convertPoint:anchor.center fromView:anchor.superview]; } @catch (...) {}
+    if (isfinite(c.x) && isfinite(c.y)) {
+        [UIView performWithoutAnimation:^{
+            sp.frame = CGRectMake(c.x + offset - side / 2.0, c.y - side / 2.0, side, side);
+        }];
+    }
+    sp.hidden = NO;
+    sp.alpha = alpha;
+    return YES;
+}
+
 static BOOL DAOPlaceSide(BOOL left, UIView *pill, CGRect pillRect,
                          CGFloat sideFactor, CGFloat offset, CGFloat scale, CGFloat alpha) {
     if (!pill) { DAOHideSprite(left); return NO; }
@@ -997,50 +1084,42 @@ static BOOL DAOPlaceSide(BOOL left, UIView *pill, CGRect pillRect,
     CGFloat W = pb.size.width, H = pb.size.height;
     if (W < 8 || H < 8) { DAOHideSprite(left); return NO; }
 
-    // ── 以下算法逐行取自原版 0x167b4 ─────────────────────────────
-    //   CGFloat H = CGRectGetHeight(bounds);      (0x1a0b4)
-    //   CGFloat W = CGRectGetWidth(bounds);       (0x1a0f0)
-    //   side = MIN(size * H, 40.0);               (0x1689c 常量 0x4044.. = 40.0)
-    //   左: CGRectMake(offset,        (H-side)/2, side, side)      (0x168cc..0x168e4)
-    //   右: CGRectMake(W-side-offset, (H-side)/2, side, side)      (0x16908..0x1692c)
-    //   原版不做任何 clamp —— 位置就是端点，越界也不收。
+    // 尺寸：原版 0x167b4 —— side = MIN(size * 岛高, 40.0)
     CGFloat side = MIN(sideFactor * H, 40.0);
     if (scale != 1.0) side = MIN(side * scale, 40.0);
     if (side < 6.0) { DAOHideSprite(left); return NO; }
 
+    // ── 锚点选择（这是「独立岛挂不上」的根因所在）─────────────────
+    //   左（录屏）：系统红点 SBRecordingIndicatorView 的实际位置
+    //   右（音乐）：岛内专辑封面 UIImageView 的实际位置
+    // 挂载点选「锚点向上的就近大视图」，圆心跟锚点 —— 与 RecordingSharingan 6.20
+    // 在真机上验证过的做法一致（addSubview 到元素内部 + 用宿主本地坐标）。
+    UIView *anchor = nil;
+    BOOL haveAnchor = NO;
+    if (left) {
+        UIView *dot = DAONativeRecordingIndicator();
+        if (dot && dot.window && dot.superview) { anchor = dot; haveAnchor = YES; }
+    } else {
+        CGRect artVis = CGRectZero;
+        UIImageView *art = DAOArtworkInPill(pill, &artVis);
+        if (art && art.window && art.superview) {
+            anchor = art;
+            haveAnchor = YES;
+            // 封面在屏幕上被裁成圆：用可见直径作为下限，保证能盖住
+            if (artVis.size.height > 0) side = MIN(40.0, MAX(side, artVis.size.height * 1.02));
+        }
+    }
+    if (haveAnchor) {
+        return DAOMountSprite(left, pill, anchor, side, offset, alpha);
+    }
+
+    // 没有锚点（红点还没生成 / 没有封面）：退回容器端点摆放
     CGFloat x = left ? offset : (W - side - offset);
     CGFloat y = (H - side) / 2.0;
     CGRect frame = CGRectMake(x, y, side, side);
 
-    // ── 左侧（录屏）：挂在岛容器里（不会被 22x22 的 portal 裁掉），
-    // 但**圆心跟随系统红点**。挂载点选容器、定位用红点 —— 两者结合：
-    //   · 挂容器 → 素材尺寸自由，不被小 portal 裁切
-    //   · 圆心跟红点 → 系统 morph 时位置天然正确，暂停录屏也不会消失
-    UIView *dot = left ? DAONativeRecordingIndicator() : nil;
-    CGPoint dotCenter = CGPointZero;
-    BOOL haveDot = NO;
-    if (dot && dot.window && dot.superview) {
-        @try {
-            dotCenter = [pill convertPoint:dot.center fromView:dot.superview];
-            haveDot = isfinite(dotCenter.x) && isfinite(dotCenter.y);
-        } @catch (...) {}
-    }
-    CGFloat eyeSide = MIN(sideFactor * H, 40.0);
-    if (scale != 1.0) eyeSide = MIN(eyeSide * scale, 40.0);
-    if (haveDot) {
-        // 至少比红点大一点，才能完全盖住
-        CGFloat dm = MAX(CGRectGetWidth(dot.bounds), CGRectGetHeight(dot.bounds));
-        eyeSide = MAX(eyeSide, dm * 1.15);
-        eyeSide = MIN(MAX(eyeSide, 6.0), 40.0);
-        CGFloat half = eyeSide / 2.0;
-        dotCenter.x = MAX(half - H * 0.5, MIN(W - half + H * 0.5, dotCenter.x + offset));
-        dotCenter.y = MAX(half - H * 0.5, MIN(H + half, dotCenter.y));
-        frame = CGRectMake(dotCenter.x - half, dotCenter.y - half, eyeSide, eyeSide);
-    }
-
     // 帧间隔：原版 islandgv_active_frame_interval（0.01~0.2s，是「每帧时长」不是 fps）
     CGFloat interval = DAODouble(@"islandgv_active_frame_interval", 0.1, 0.01, 0.2);
-    // ────────────────────────────────────────────────────────────
 
     // 1) 选中的素材文件夹（mp4 / gif / png）优先
     NSString *mediaPath = DAOFolderMediaPath();
@@ -1329,13 +1408,14 @@ static BOOL DAORefreshGeometryOnly(UIView *pill, CGRect pr, BOOL modeOn, BOOL ex
             continue;
         }
         if (!sides[i].on) continue;
-        // 只更新参数；frame 由 displaylink 每帧读容器的 presentation layer 自动算，
-        // 这样系统做 morph 放大缩小时素材是同步跟随，不会落后一拍。
-        sp.hostPill   = pill;
-        sp.sideFactor = sides[i].size * scale;   // 比例并入，displaylink 统一算尺寸
-        sp.xOffset    = sides[i].off;
-        sp.isLeftSide = left;
-        sp.alpha      = alpha;
+        // 只更新参数；位置由 displaylink 每帧按锚点（红点/封面）的 presentation
+        // 自动跟随，系统 morph 时素材天然同步，不会落后一拍。
+        CGFloat hh = pill.bounds.size.height;
+        CGFloat sd = MIN(sides[i].size * hh, 40.0);
+        if (scale != 1.0) sd = MIN(sd * scale, 40.0);
+        sp.side    = MAX(6.0, sd);
+        sp.xOffset = sides[i].off;
+        sp.alpha   = alpha;
     }
     return YES;
 }
@@ -1376,8 +1456,12 @@ static void DAOScan(BOOL verbose) {
         if (only && DAOPills().count == 1) recPill = only;
     }
 
-    // 音乐岛：靠封面图判定，不看 identifier
+    // 音乐岛：先按「岛内有方形封面」找容器；找不到再退一步，
+    // 直接在 SAUIElementView 里找带封面的那个（独立岛分离时容器可能还没就绪）。
     UIView *musicPill = DAOPillWithArtwork(recPill);
+    if (!musicPill) {
+        musicPill = DAOElementPillWithArtwork(recPill);
+    }
     if (musicPill) {
         CGRect mr = DAOScreenRect(musicPill);
         CGFloat sw = [UIScreen mainScreen].bounds.size.width;
@@ -1507,7 +1591,50 @@ static void DAOPurge(void) {
 
 // 核心：元素视图。内容进入 / 尺寸变化 / 移除，都从这里驱动，
 // 不再扫窗口找红点 —— 那才是「没录屏也冒素材」的根源。
+// 系统红点每次布局/换宿主/改尺寸都重同步一次。
+// 这是 RecordingSharingan 6.20 里最关键的一组 hook：素材能「一直挂住、跟着岛动」，
+// 靠的就是在这些时机重新对齐，而不是等我们的定时器去轮询。
+%hook SBRecordingIndicatorView
+
+- (void)layoutSubviews {
+    %orig;
+    if (!DAOAnyOn()) return;
+    DAOScanSoon(0.0, NO);
+}
+
+- (void)didMoveToSuperview {
+    %orig;
+    if (!DAOAnyOn()) return;
+    DAOScanSoon(0.0, NO);
+}
+
+- (void)didMoveToWindow {
+    %orig;
+    if (!DAOAnyOn()) return;
+    DAOScanSoon(0.0, NO);
+}
+
+- (void)setFrame:(CGRect)frame {
+    %orig;
+    if (!DAOAnyOn() || [UIScreen mainScreen].isCaptured == NO) return;
+    // 红点位置变了（含 morph 动画每帧）→ 立刻把素材圆心上移过去
+    @try {
+        DAOSpriteView *sp = gLeftSprite;
+        if (sp && sp.anchorView == (UIView *)self && sp.superview == sp.hostView) {
+            DAOSyncSpriteFrame(sp);
+        }
+    } @catch (...) {}
+}
+
+%end
+
 %hook SAUIElementView
+
+- (void)layoutSubviews {
+    %orig;
+    if (!DAOAnyOn()) return;
+    DAOScanSoon(0.0, NO);
+}
 
 - (void)didAddSubview:(UIView *)subview {
     %orig;

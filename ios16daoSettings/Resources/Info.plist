@@ -9,8 +9,8 @@
 	<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
 	<key>CFBundleName</key><string>动态岛</string>
 	<key>CFBundlePackageType</key><string>BNDL</string>
-	<key>CFBundleShortVersionString</key><string>1.7.0</string>
-	<key>CFBundleVersion</key><string>1.7.0</string>
+	<key>CFBundleShortVersionString</key><string>1.8.0</string>
+	<key>CFBundleVersion</key><string>1.8.0</string>
 	<key>NSPrincipalClass</key><string>DAOListController</string>
 </dict>
 </plist>
