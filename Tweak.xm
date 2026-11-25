@@ -247,47 +247,47 @@ static CADisplayLink *gFrameLink;
 static void DAOSyncSpriteFrame(DAOSpriteView *sp) {
     UIView *host = sp.hostView;
     if (!host || sp.superview != host || !host.window) return;
-    if (sp.side < 6.0) return;
 
-    // 容器尺寸一律读 presentation：系统 morph 动画进行到哪，素材就跟到哪。
+    // 尺寸一律读 presentation：系统 morph 动画进行到哪，素材就跟到哪。
     CALayer *hl = (CALayer *)host.layer.presentationLayer ?: host.layer;
     CGSize hb = hl ? hl.bounds.size : host.bounds.size;
-    if (hb.width < 8 || hb.height < 8) return;
+    if (hb.width < 4 || hb.height < 4) return;
 
-    // 元素内挂载（side==0）：宿主自己会跟着系统缩放，但 bounds 在动画中滞后，
-    // 用 presentation 重算，素材才能和岛同步放大缩小。
+    CGFloat target;
+    CGPoint center;
+
     if (sp.side <= 0.01) {
-        CGFloat target = MIN(MIN(hb.width, hb.height), 40.0);
-        CALayer *al = (CALayer *)host.layer.presentationLayer ?: host.layer;
-        if (al) target = MIN(MIN(al.bounds.size.width, al.bounds.size.height), 40.0);
-        target = MAX(6.0, target);
-        CGRect f = CGRectMake((hb.width - target) / 2.0, (hb.height - target) / 2.0, target, target);
-        if (!CGRectEqualToRect(sp.frame, f)) {
-            [CATransaction begin];
-            [CATransaction setDisableActions:YES];
-            sp.frame = f;
-            [CATransaction commit];
+        // ── 元素内挂载：宿主就是 providedView，边长跟宿主走 ──
+        // 注意这里必须在「side < 6」判断之前处理，否则 side==0 会被直接 return 掉，
+        // 水平偏移就只在挂载那一刻算一次 —— 这就是滑块看起来没反应的原因。
+        target = MAX(4.0, MIN(MIN(hb.width, hb.height), 40.0));
+        center = CGPointMake(hb.width / 2.0 + sp.xOffset, hb.height / 2.0);
+    } else {
+        target = sp.side;
+        UIView *anchor = sp.anchorView;
+        BOOL ok = NO;
+        CGPoint c = CGPointZero;
+        if (anchor && anchor.superview && anchor.window) {
+            @try {
+                CALayer *al = (CALayer *)anchor.layer.presentationLayer ?: anchor.layer;
+                CGPoint local = CGPointMake(CGRectGetMidX(al.bounds), CGRectGetMidY(al.bounds));
+                c = [al convertPoint:local toLayer:hl];
+                ok = isfinite(c.x) && isfinite(c.y);
+            } @catch (...) {}
         }
-        return;
+        if (!ok) c = CGPointMake(sp.xOffset + target / 2.0, hb.height / 2.0);
+        center = CGPointMake(c.x + sp.xOffset, c.y);
     }
 
-    CGPoint c = CGPointZero;
-    BOOL ok = NO;
-    UIView *anchor = sp.anchorView;
-    if (anchor && anchor.superview && anchor.window) {
-        @try {
-            CALayer *al = (CALayer *)anchor.layer.presentationLayer ?: anchor.layer;
-            CGPoint local = CGPointMake(CGRectGetMidX(al.bounds), CGRectGetMidY(al.bounds));
-            c = [al convertPoint:local toLayer:hl];
-            ok = isfinite(c.x) && isfinite(c.y);
-        } @catch (...) {}
-    }
-    if (!ok) {
-        // 没有锚点：贴容器端点（原版 0x167b4 的做法）
-        c = CGPointMake(sp.xOffset + sp.side / 2.0, hb.height / 2.0);
-    }
-    c.x += sp.xOffset;
-    CGRect f = CGRectMake(c.x - sp.side / 2.0, c.y - sp.side / 2.0, sp.side, sp.side);
+    if (target < 4.0) return;
+
+    CGFloat half = target / 2.0;
+    // 允许溢出宿主 25%：宿主常常只比素材大一点点，夹太死偏移就没有行程。
+    CGFloat slackX = hb.width * 0.25, slackY = hb.height * 0.25;
+    center.x = MAX(half - slackX, MIN(hb.width - half + slackX, center.x));
+    center.y = MAX(half - slackY, MIN(hb.height - half + slackY, center.y));
+
+    CGRect f = CGRectMake(center.x - half, center.y - half, target, target);
     if (!CGRectEqualToRect(sp.frame, f)) {
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
@@ -798,6 +798,8 @@ static void DAORestoreDots(void) {
 //   element-identifier:systemApertureElementIdentifierScreenRecording
 // 所以必须逐个容器按自己的 identifier 分类 —— 不能「取最宽的那个」，
 // 因为录屏和时钟/音乐可以同时各有一个容器（日志 817219872.6 就是这样）。
+static NSUInteger gCaptureGraceGen = 0;
+static BOOL gCaptureGraceHidden = NO;
 static BOOL DAOHasTag(UIView *pill, NSString *token, NSInteger depth);
 static UIImageView *DAOArtworkInPill(UIView *pill, CGRect *visibleOut);
 static UIView *DAONativeRecordingIndicator(void);
@@ -1293,28 +1295,25 @@ static BOOL DAOMountIntoElement(UIView *elementView, BOOL left, CGFloat ratio, C
         sp.cursor = NSUIntegerMax;
     }
     sp.hostView   = host;
+    sp.xOffset    = left ? offset : -offset;   // 带符号：左正右负，sync 里直接加
     sp.side       = 0;                // 0 = 不自算 frame
-    sp.xOffset    = 0;
-
     CGRect b = host.bounds;
     CGFloat side = MIN(b.size.width, b.size.height);
     side = MIN(40.0, MAX(side * MAX(0.1, ratio), 6.0));
     side = MIN(side, 40.0);
 
     // 水平偏移：设置里的正数 = 往该侧外移。
-    // 必须夹在宿主内 —— 之前 offset 没被使用，而且负坐标会让素材被宿主裁掉
-    // （日志里 eye={{-7,-6}...} 就是这个现象）。
+    // 注意：宿主（providedView）往往只比素材大几个点，若把圆心夹在
+    // [half, w-half]，偏移可用范围只有 ±2pt —— 这就是「滑块像没效果」的原因。
+    // 所以只把圆心夹在宿主范围内，允许素材溢出宿主（下面对宿主关掉裁剪）。
+    host.clipsToBounds = NO;
+    host.layer.masksToBounds = NO;
     CGFloat cx = b.size.width / 2.0 + (left ? offset : -offset);
     CGFloat half = side / 2.0;
-    if (b.size.width > side) {
-        cx = MAX(half, MIN(b.size.width - half, cx));
-    } else {
-        cx = b.size.width / 2.0;
-    }
+    CGFloat slackX = b.size.width * 0.25, slackY = b.size.height * 0.25;
+    cx = MAX(half - slackX, MIN(b.size.width - half + slackX, cx));
     CGFloat cy = b.size.height / 2.0;
-    if (b.size.height > side) {
-        cy = MAX(half, MIN(b.size.height - half, cy));
-    }
+    cy = MAX(half - slackY, MIN(b.size.height - half + slackY, cy));
     CGRect f = CGRectMake(cx - half, cy - half, side, side);
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
@@ -1658,7 +1657,8 @@ static void DAOScan(BOOL verbose) {
             if (ap) @try { DAOAttachAperture(ap, YES); } @catch (...) {}
         }
         CGFloat alphaEl = DAODouble(@"islandgv_alpha", 1.0, 0.0, 1.0);
-        BOOL leftOn  = modeOnEl && DAOBool(@"islandgv_active_custom_album", NO) && recEl;
+        BOOL leftOn  = modeOnEl && DAOBool(@"islandgv_active_custom_album", NO) && recEl
+                       && !gCaptureGraceHidden;
         BOOL rightOn = modeOnEl && DAOBool(@"islandgv_active_custom_dance", NO) && musEl;
         if (leftOn || rightOn) {
             // 元素切换时先把原生红点压掉，避免「先看到红点、再被素材盖上」的闪一下
@@ -1926,11 +1926,36 @@ static void DAOPurge(void) {
 
 #pragma mark - 通知
 
+// 录屏结束/暂停的收尾：capture 变 NO 后不要立刻撤，也不要一直挂着 ——
+// 系统移除录屏元素会延迟约 1 秒，期间 issue 就是「已经保存到相册了素材还挂着」。
+// 这里给 0.22s 宽限期：期间 capture 恢复（暂停后又继续）就取消，否则立刻撤掉。
+static void DAOCaptureGrace(BOOL captured) {
+    NSUInteger gen = ++gCaptureGraceGen;
+    if (captured) {
+        gCaptureGraceHidden = NO;
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.22 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (gen != gCaptureGraceGen) return;                 // 期间恢复了，取消
+        if ([UIScreen mainScreen].isCaptured) return;
+        gCaptureGraceHidden = YES;
+        @try {
+            DAOHideSprite(YES);
+            if (gLeftSprite) gLeftSprite.anchorView = nil;
+        } @catch (...) {}
+        DAOLog(@"capture grace: hide eye");
+        DAOScanSoon(0.0, NO);
+    });
+}
+
 static void DAOObserve(void) {
     [[NSNotificationCenter defaultCenter] addObserverForName:UIScreenCapturedDidChangeNotification
                                                       object:nil queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(__unused NSNotification *n) {
-        DAOLog(@"capture -> %d", [UIScreen mainScreen].isCaptured);
+        BOOL cap = [UIScreen mainScreen].isCaptured;
+        DAOLog(@"capture -> %d", cap);
+        DAOCaptureGrace(cap);
         DAOScanSoon(0.08, YES);
         DAOScanSoon(0.20, YES);
         DAOScanSoon(0.35, YES);
