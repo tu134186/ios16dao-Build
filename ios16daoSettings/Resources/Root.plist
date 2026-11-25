@@ -216,6 +216,10 @@
 			<string>com.minis.ios16dao/changed</string>
 			<key>cell</key>
 			<string>PSSwitchCell</string>
+			<key>condition</key>
+			<string>aperture_enabled</string>
+			<key>conditionDefault</key>
+			<false/>
 			<key>default</key>
 			<false/>
 			<key>defaults</key>
@@ -232,6 +236,10 @@
 			<string>PSSliderCell</string>
 			<key>cellClass</key>
 			<string>DAOAdjustCell</string>
+			<key>condition</key>
+			<string>aperture_enabled</string>
+			<key>conditionDefault</key>
+			<false/>
 			<key>default</key>
 			<real>3.5</real>
 			<key>defaults</key>
@@ -254,6 +262,10 @@
 			<string>com.minis.ios16dao/changed</string>
 			<key>cell</key>
 			<string>PSLinkListCell</string>
+			<key>condition</key>
+			<string>aperture_enabled</string>
+			<key>conditionDefault</key>
+			<false/>
 			<key>default</key>
 			<integer>0</integer>
 			<key>defaults</key>
@@ -286,6 +298,10 @@
 			<string>com.minis.ios16dao/changed</string>
 			<key>cell</key>
 			<string>PSLinkListCell</string>
+			<key>condition</key>
+			<string>aperture_enabled</string>
+			<key>conditionDefault</key>
+			<false/>
 			<key>default</key>
 			<string>#007AFF</string>
 			<key>defaults</key>
@@ -326,6 +342,10 @@
 			<string>com.minis.ios16dao/changed</string>
 			<key>cell</key>
 			<string>PSSwitchCell</string>
+			<key>condition</key>
+			<string>aperture_enabled</string>
+			<key>conditionDefault</key>
+			<false/>
 			<key>default</key>
 			<false/>
 			<key>defaults</key>
@@ -444,6 +464,10 @@
 			<string>com.minis.ios16dao/changed</string>
 			<key>cell</key>
 			<string>PSSwitchCell</string>
+			<key>condition</key>
+			<string>aperture_enabled</string>
+			<key>conditionDefault</key>
+			<false/>
 			<key>default</key>
 			<false/>
 			<key>defaults</key>
@@ -458,6 +482,10 @@
 			<string>com.minis.ios16dao/changed</string>
 			<key>cell</key>
 			<string>PSSegmentCell</string>
+			<key>condition</key>
+			<string>aperture_particle_enabled</string>
+			<key>conditionDefault</key>
+			<false/>
 			<key>default</key>
 			<integer>0</integer>
 			<key>defaults</key>

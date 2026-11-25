@@ -15,7 +15,7 @@
 #import <math.h>
 #import <stdio.h>
 
-static NSString *const DAOVersion  = @"2.0.0";
+static NSString *const DAOVersion  = @"2.1.0";
 static const char *const DAONotify = "com.minis.ios16dao/changed";
 static NSString *const DAORoot     = @"/var/mobile/ios16dao";
 static NSString *const DAOLogPath  = @"/var/mobile/ios16dao.log";
@@ -253,6 +253,23 @@ static void DAOSyncSpriteFrame(DAOSpriteView *sp) {
     CALayer *hl = (CALayer *)host.layer.presentationLayer ?: host.layer;
     CGSize hb = hl ? hl.bounds.size : host.bounds.size;
     if (hb.width < 8 || hb.height < 8) return;
+
+    // 元素内挂载（side==0）：宿主自己会跟着系统缩放，但 bounds 在动画中滞后，
+    // 用 presentation 重算，素材才能和岛同步放大缩小。
+    if (sp.side <= 0.01) {
+        CGFloat target = MIN(MIN(hb.width, hb.height), 40.0);
+        CALayer *al = (CALayer *)host.layer.presentationLayer ?: host.layer;
+        if (al) target = MIN(MIN(al.bounds.size.width, al.bounds.size.height), 40.0);
+        target = MAX(6.0, target);
+        CGRect f = CGRectMake((hb.width - target) / 2.0, (hb.height - target) / 2.0, target, target);
+        if (!CGRectEqualToRect(sp.frame, f)) {
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            sp.frame = f;
+            [CATransaction commit];
+        }
+        return;
+    }
 
     CGPoint c = CGPointZero;
     BOOL ok = NO;
@@ -630,6 +647,8 @@ static void DAOSetAnim(CALayer *layer, NSString *key, NSString *path, id from, i
                                  (__bridge id)[UIColor colorWithRed:1 green:1 blue:1 alpha:0.05].CGColor,
                                  (__bridge id)color.CGColor,
                                  (__bridge id)[UIColor whiteColor].CGColor ];
+        // 流星：比彩虹环快得多，才有「扫过」的观感
+        [self.rainbow removeAnimationForKey:@"dao.rainbow.rotate"];
         DAOSetAnim(self.rainbow, @"dao.rainbow.rotate", @"transform.rotation.z", @0, @(M_PI * 2), 1.1, YES);
         self.ring.lineDashPattern = nil;
     } else if (style == 3) {
@@ -642,7 +661,17 @@ static void DAOSetAnim(CALayer *layer, NSString *key, NSString *path, id from, i
                                  (__bridge id)UIColor.systemBlueColor.CGColor,
                                  (__bridge id)UIColor.systemPurpleColor.CGColor,
                                  (__bridge id)UIColor.systemPinkColor.CGColor ];
-        DAOSetAnim(self.rainbow, @"dao.stage", @"opacity", @1.0, @0.25, 0.22, NO);
+        // 闪烁：1.0 <-> 0.25 来回，无限重复（原来只播一次，所以看起来「没效果」）
+        if (![self.rainbow animationForKey:@"dao.stage"]) {
+            CABasicAnimation *blink = [CABasicAnimation animationWithKeyPath:@"opacity"];
+            blink.fromValue = @1.0;
+            blink.toValue = @0.25;
+            blink.duration = MAX(0.05, 1.0 / MAX(0.5, DAODouble(@"aperture_shadow_flash_rate", 10.0, 0.2, 10.0)) * 2.0);
+            blink.autoreverses = YES;
+            blink.repeatCount = HUGE_VALF;
+            blink.removedOnCompletion = NO;
+            [self.rainbow addAnimation:blink forKey:@"dao.stage"];
+        }
         self.ring.lineDashPattern = nil;
     } else {
         self.rainbow.hidden = YES;
@@ -679,6 +708,8 @@ static void DAOSetAnim(CALayer *layer, NSString *key, NSString *path, id from, i
             self.emitter.emitterCells = @[ cell ];
         }
         self.emitter.renderMode = kCAEmitterLayerAdditive;
+        self.emitter.emitterShape = kCAEmitterLayerRectangle;
+        [self.layer insertSublayer:self.emitter atIndex:(unsigned)self.layer.sublayers.count];
     } else {
         self.emitter.hidden = YES;
     }
@@ -1252,20 +1283,39 @@ static BOOL DAOMountIntoElement(UIView *elementView, BOOL left, CGFloat ratio, C
     }
     [host bringSubviewToFront:sp];
 
-    // 不做任何逐帧定位：自适应蒙版让系统改尺寸时它自己跟着变
-    sp.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    // 元素内挂载：宿主本身会跟着系统缩放，素材用固定边长 + 居中，
+    // 不用 autoresizing（那会让每帧重排、还会把圆形拉扁）。
+    sp.autoresizingMask = UIViewAutoresizingNone;
+    // anchorView 存元素本身：元素换人（左→右切换）时立刻重建，不用旧尺寸硬撑
+    if (sp.anchorView != elementView) {
+        sp.anchorView = elementView;
+        sp.startedAt = CACurrentMediaTime();
+        sp.cursor = NSUIntegerMax;
+    }
     sp.hostView   = host;
-    sp.anchorView = nil;
-    sp.side       = 0;                // 0 = 不自算 frame，用 bounds 铺满
+    sp.side       = 0;                // 0 = 不自算 frame
     sp.xOffset    = 0;
 
     CGRect b = host.bounds;
     CGFloat side = MIN(b.size.width, b.size.height);
-    side = MIN(40.0, MAX(side * MAX(0.1, ratio) * MAX(0.4, 1.0), 6.0));
+    side = MIN(40.0, MAX(side * MAX(0.1, ratio), 6.0));
     side = MIN(side, 40.0);
-    CGFloat inset = MAX(0.0, offset);
-    CGRect f = CGRectMake((b.size.width - side) / 2.0 + (left ? inset : -inset),
-                          (b.size.height - side) / 2.0, side, side);
+
+    // 水平偏移：设置里的正数 = 往该侧外移。
+    // 必须夹在宿主内 —— 之前 offset 没被使用，而且负坐标会让素材被宿主裁掉
+    // （日志里 eye={{-7,-6}...} 就是这个现象）。
+    CGFloat cx = b.size.width / 2.0 + (left ? offset : -offset);
+    CGFloat half = side / 2.0;
+    if (b.size.width > side) {
+        cx = MAX(half, MIN(b.size.width - half, cx));
+    } else {
+        cx = b.size.width / 2.0;
+    }
+    CGFloat cy = b.size.height / 2.0;
+    if (b.size.height > side) {
+        cy = MAX(half, MIN(b.size.height - half, cy));
+    }
+    CGRect f = CGRectMake(cx - half, cy - half, side, side);
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     sp.frame = f;
@@ -1454,13 +1504,46 @@ static void DAORestoreArtwork(void) {
 
 #pragma mark - 主扫描
 
+// 从元素视图往上找真正的 SBSystemApertureContainerView
+static UIView *DAOEnclosingApertureContainer(UIView *v) {
+    if (!v) return nil;
+    for (int i = 0; v && i < 18; i++, v = v.superview) {
+        NSString *n = NSStringFromClass(v.class);
+        if ([n containsString:@"SBSystemApertureContainerView"]) return v;
+    }
+    return nil;
+}
+
+// 给光圈找「该描哪一圈」：优先元素所在容器；元素还没进容器时，
+// 用屏幕矩形最接近的那个容器（而不是拿元素自己当岛）。
+static UIView *DAOApertureTargetFor(UIView *element) {
+    if (!element) return nil;
+    UIView *c = DAOEnclosingApertureContainer(element);
+    if (c && c.window) return c;
+    CGRect er = DAOScreenRect(element);
+    UIView *best = nil; CGFloat bestD = CGFLOAT_MAX;
+    for (UIView *p in DAOPills()) {
+        CGRect pr = DAOScreenRect(p);
+        CGFloat d = fabs(CGRectGetMinX(pr) - CGRectGetMinX(er))
+                  + fabs(CGRectGetMinY(pr) - CGRectGetMinY(er))
+                  + fabs(CGRectGetWidth(pr) - CGRectGetWidth(er));
+        if (d < bestD) { bestD = d; best = p; }
+    }
+    return best;
+}
+
 static void DAOAttachAperture(UIView *pill, BOOL expanded) {
+    // 传进来的可能是 SAUIElementView（元素），光圈要描的是「岛容器」的轮廓
+    UIView *container = DAOEnclosingApertureContainer(pill) ?: pill;
+    if (container != pill) pill = container;
     if (!pill || !DAOBool(@"aperture_enabled", NO)) {
         if (gAperture) [gAperture applyRect:CGRectZero active:NO];
         return;
     }
+    // 「常驻」打开时，无论岛展开还是收起、素材开关开不开，都保持光圈
     BOOL permanent = DAOBool(@"aperture_permanent", NO);
-    if (!permanent && !expanded && !DAOAnyOn()) {
+    BOOL anyMode = DAOExpandedOn() || DAOPillOn();
+    if (!permanent && !expanded && !anyMode) {
         if (gAperture) [gAperture applyRect:CGRectZero active:NO];
         return;
     }
@@ -1473,6 +1556,8 @@ static void DAOAttachAperture(UIView *pill, BOOL expanded) {
         [gAperture removeFromSuperview];
         [pill.superview addSubview:gAperture];
     }
+    // 保证在最上层：素材和背板都不会盖住光圈
+    [pill.superview bringSubviewToFront:gAperture];
     // 挂进 superview 后坐标空间变了：把岛的屏幕矩形换算到该视图本地坐标
     CGRect pr = DAOScreenRect(pill);
     CGRect local = pr;
@@ -1558,10 +1643,26 @@ static void DAOScan(BOOL verbose) {
             }
         }
         BOOL modeOnEl = DAOExpandedOn() || DAOPillOn();
+
+        // 只开光圈、不开素材：元素路径会跳过，所以这里单独画一次。
+        // （2.0.0 把光圈塞进了素材分支里，导致「只开光圈」完全没反应。）
+        if (DAOBool(@"aperture_enabled", NO)) {
+            UIView *ap = nil;
+            if (recEl || musEl) {
+                ap = DAOApertureTargetFor(recEl ?: musEl);
+            } else {
+                BOOL e2 = NO;
+                UIView *mp = DAOMainPill(&e2);
+                ap = mp;
+            }
+            if (ap) @try { DAOAttachAperture(ap, YES); } @catch (...) {}
+        }
         CGFloat alphaEl = DAODouble(@"islandgv_alpha", 1.0, 0.0, 1.0);
         BOOL leftOn  = modeOnEl && DAOBool(@"islandgv_active_custom_album", NO) && recEl;
         BOOL rightOn = modeOnEl && DAOBool(@"islandgv_active_custom_dance", NO) && musEl;
         if (leftOn || rightOn) {
+            // 元素切换时先把原生红点压掉，避免「先看到红点、再被素材盖上」的闪一下
+            if (leftOn && DAOBool(@"islandgv_dnl_enabled", NO)) DAOHideBackdropIn(recEl, YES);
             BOOL okL = leftOn ? DAOMountIntoElement(recEl, YES,
                         DAODouble(@"islandgv_active_left_size", 0.9, 0.6, 2.0),
                         DAODouble(@"islandgv_active_left_offset", 1.5, -10.0, 10.0), alphaEl) : NO;
@@ -1584,9 +1685,9 @@ static void DAOScan(BOOL verbose) {
                            (gLeftSprite && !gLeftSprite.hidden) ? NSStringFromCGRect(gLeftSprite.frame) : @"-",
                            (gRightSprite && !gRightSprite.hidden) ? NSStringFromCGRect(gRightSprite.frame) : @"-");
                 }
-                // 光圈仍按容器矩形走（它描的是岛的轮廓，不是元素内容）
+                // 光圈按「岛容器」描边，与素材开关无关
                 @try {
-                    UIView *ap = recEl ?: musEl;
+                    UIView *ap = DAOApertureTargetFor(recEl ?: musEl);
                     if (ap) DAOAttachAperture(ap, YES);
                 } @catch (...) {}
                 return;
