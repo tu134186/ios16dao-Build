@@ -252,22 +252,28 @@ static void DAOTickFrames(CADisplayLink *link) {
     }
 }
 
+@interface DAOFrameTicker : NSObject
+- (void)tick:(CADisplayLink *)link;
+@end
+
+@implementation DAOFrameTicker
+- (void)tick:(CADisplayLink *)link { DAOTickFrames(link); }
+@end
+
+static DAOFrameTicker *gTicker;
+
 static void DAOEnsureFrameLink(void) {
     if (!gAllSprites) gAllSprites = [NSMutableArray array];
     if (gFrameLink) return;
-    gFrameLink = [CADisplayLink displayLinkWithTarget:
-                  ({
-                      id proxy = [NSObject new];
-                      class_addMethod(proxy.class, @selector(tick:),
-                                      imp_implementationWithBlock(^(id _s, CADisplayLink *l) {
-                          DAOTickFrames(l);
-                      }), "v@:@");
-                      proxy;
-                  }) selector:@selector(tick:)];
+    if (!gTicker) gTicker = [DAOFrameTicker new];
+    gFrameLink = [CADisplayLink displayLinkWithTarget:gTicker selector:@selector(tick:)];
     if (@available(iOS 15.0, *)) {
         gFrameLink.preferredFrameRateRange = CAFrameRateRangeMake(30, 60, 60);
     } else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
         gFrameLink.preferredFramesPerSecond = 60;
+#pragma clang diagnostic pop
     }
     [gFrameLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
 }
