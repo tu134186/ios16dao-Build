@@ -770,7 +770,6 @@ static void DAORestoreDots(void) {
 static BOOL DAOHasTag(UIView *pill, NSString *token, NSInteger depth);
 static UIImageView *DAOArtworkInPill(UIView *pill, CGRect *visibleOut);
 static UIView *DAONativeRecordingIndicator(void);
-static UIView *DAOEnclosingHostFor(UIView *target, CGFloat side);
 static UIView *DAOProvidedContainer(UIView *element, NSInteger depth);
 
 static UIView *DAOPillForElement(NSString *token, BOOL *found) {
@@ -1035,21 +1034,6 @@ static void DAOReparent(UIView *v, UIView *host) {
     [host bringSubviewToFront:v];
 }
 
-// 从 target 往上找第一个「尺寸足够容纳 side」的祖先视图作为挂载宿主。
-// 为什么要往上找：红点/封面所在的叶子视图往往很小（红点宿主实测 22x22），
-// 直接把 33~40pt 的素材塞进去会被裁掉；往上找到够大的那一层，既不会裁，
-// 又仍然在元素内部 —— 系统 morph 时素材跟着父视图一起动，像原装一样。
-static UIView *DAOEnclosingHostFor(UIView *target, CGFloat side) {
-    if (!target) return nil;
-    UIView *v = target.superview;
-    for (int i = 0; v && i < 14; i++, v = v.superview) {
-        CGSize b = v.bounds.size;
-        if (b.width >= side * 0.92 && b.height >= side * 0.92) return v;
-    }
-    return target.superview;
-}
-
-// 素材挂载：host = 元素内部足够大的视图；圆心 = 红点/封面 的实时中心。
 // 挂载：宿主固定为灵动岛容器（容器一定在窗口里、不会被小 portal 裁掉），
 // 圆心则由 anchor（红点/封面）的 presentation 中心决定。
 // 之前把精灵挂到「往上找的大宿主」，那层常常是离屏 portal 叶子，导致素材算出了
