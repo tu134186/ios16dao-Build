@@ -1223,7 +1223,6 @@ static BOOL DAORefreshGeometryOnly(UIView *pill, CGRect pr, BOOL modeOn, BOOL ex
 
     CGFloat scale = DAODouble(@"islandgv_scale", 1.0, 0.5, 1.5);
     CGFloat alpha = DAODouble(@"islandgv_alpha", 1.0, 0.0, 1.0);
-    CGFloat h = pb.size.height;
 
     struct { BOOL left; BOOL on; CGFloat size; CGFloat off; } sides[2] = {
         { YES, DAOBool(@"islandgv_active_custom_album", NO),
