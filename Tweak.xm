@@ -15,7 +15,7 @@
 #import <math.h>
 #import <stdio.h>
 
-static NSString *const DAOVersion  = @"2.1.0";
+static NSString *const DAOVersion  = @"2.0.1";
 static const char *const DAONotify = "com.minis.ios16dao/changed";
 static NSString *const DAORoot     = @"/var/mobile/ios16dao";
 static NSString *const DAOLogPath  = @"/var/mobile/ios16dao.log";
@@ -247,47 +247,30 @@ static CADisplayLink *gFrameLink;
 static void DAOSyncSpriteFrame(DAOSpriteView *sp) {
     UIView *host = sp.hostView;
     if (!host || sp.superview != host || !host.window) return;
+    if (sp.side < 6.0) return;
 
-    // 尺寸一律读 presentation：系统 morph 动画进行到哪，素材就跟到哪。
+    // 容器尺寸一律读 presentation：系统 morph 动画进行到哪，素材就跟到哪。
     CALayer *hl = (CALayer *)host.layer.presentationLayer ?: host.layer;
     CGSize hb = hl ? hl.bounds.size : host.bounds.size;
-    if (hb.width < 4 || hb.height < 4) return;
+    if (hb.width < 8 || hb.height < 8) return;
 
-    CGFloat target;
-    CGPoint center;
-
-    if (sp.side <= 0.01) {
-        // ── 元素内挂载：宿主就是 providedView，边长跟宿主走 ──
-        // 注意这里必须在「side < 6」判断之前处理，否则 side==0 会被直接 return 掉，
-        // 水平偏移就只在挂载那一刻算一次 —— 这就是滑块看起来没反应的原因。
-        target = MAX(4.0, MIN(MIN(hb.width, hb.height), 40.0));
-        center = CGPointMake(hb.width / 2.0 + sp.xOffset, hb.height / 2.0);
-    } else {
-        target = sp.side;
-        UIView *anchor = sp.anchorView;
-        BOOL ok = NO;
-        CGPoint c = CGPointZero;
-        if (anchor && anchor.superview && anchor.window) {
-            @try {
-                CALayer *al = (CALayer *)anchor.layer.presentationLayer ?: anchor.layer;
-                CGPoint local = CGPointMake(CGRectGetMidX(al.bounds), CGRectGetMidY(al.bounds));
-                c = [al convertPoint:local toLayer:hl];
-                ok = isfinite(c.x) && isfinite(c.y);
-            } @catch (...) {}
-        }
-        if (!ok) c = CGPointMake(sp.xOffset + target / 2.0, hb.height / 2.0);
-        center = CGPointMake(c.x + sp.xOffset, c.y);
+    CGPoint c = CGPointZero;
+    BOOL ok = NO;
+    UIView *anchor = sp.anchorView;
+    if (anchor && anchor.superview && anchor.window) {
+        @try {
+            CALayer *al = (CALayer *)anchor.layer.presentationLayer ?: anchor.layer;
+            CGPoint local = CGPointMake(CGRectGetMidX(al.bounds), CGRectGetMidY(al.bounds));
+            c = [al convertPoint:local toLayer:hl];
+            ok = isfinite(c.x) && isfinite(c.y);
+        } @catch (...) {}
     }
-
-    if (target < 4.0) return;
-
-    CGFloat half = target / 2.0;
-    // 允许溢出宿主 25%：宿主常常只比素材大一点点，夹太死偏移就没有行程。
-    CGFloat slackX = hb.width * 0.25, slackY = hb.height * 0.25;
-    center.x = MAX(half - slackX, MIN(hb.width - half + slackX, center.x));
-    center.y = MAX(half - slackY, MIN(hb.height - half + slackY, center.y));
-
-    CGRect f = CGRectMake(center.x - half, center.y - half, target, target);
+    if (!ok) {
+        // 没有锚点：贴容器端点（原版 0x167b4 的做法）
+        c = CGPointMake(sp.xOffset + sp.side / 2.0, hb.height / 2.0);
+    }
+    c.x += sp.xOffset;
+    CGRect f = CGRectMake(c.x - sp.side / 2.0, c.y - sp.side / 2.0, sp.side, sp.side);
     if (!CGRectEqualToRect(sp.frame, f)) {
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
@@ -647,8 +630,6 @@ static void DAOSetAnim(CALayer *layer, NSString *key, NSString *path, id from, i
                                  (__bridge id)[UIColor colorWithRed:1 green:1 blue:1 alpha:0.05].CGColor,
                                  (__bridge id)color.CGColor,
                                  (__bridge id)[UIColor whiteColor].CGColor ];
-        // 流星：比彩虹环快得多，才有「扫过」的观感
-        [self.rainbow removeAnimationForKey:@"dao.rainbow.rotate"];
         DAOSetAnim(self.rainbow, @"dao.rainbow.rotate", @"transform.rotation.z", @0, @(M_PI * 2), 1.1, YES);
         self.ring.lineDashPattern = nil;
     } else if (style == 3) {
@@ -661,17 +642,7 @@ static void DAOSetAnim(CALayer *layer, NSString *key, NSString *path, id from, i
                                  (__bridge id)UIColor.systemBlueColor.CGColor,
                                  (__bridge id)UIColor.systemPurpleColor.CGColor,
                                  (__bridge id)UIColor.systemPinkColor.CGColor ];
-        // 闪烁：1.0 <-> 0.25 来回，无限重复（原来只播一次，所以看起来「没效果」）
-        if (![self.rainbow animationForKey:@"dao.stage"]) {
-            CABasicAnimation *blink = [CABasicAnimation animationWithKeyPath:@"opacity"];
-            blink.fromValue = @1.0;
-            blink.toValue = @0.25;
-            blink.duration = MAX(0.05, 1.0 / MAX(0.5, DAODouble(@"aperture_shadow_flash_rate", 10.0, 0.2, 10.0)) * 2.0);
-            blink.autoreverses = YES;
-            blink.repeatCount = HUGE_VALF;
-            blink.removedOnCompletion = NO;
-            [self.rainbow addAnimation:blink forKey:@"dao.stage"];
-        }
+        DAOSetAnim(self.rainbow, @"dao.stage", @"opacity", @1.0, @0.25, 0.22, NO);
         self.ring.lineDashPattern = nil;
     } else {
         self.rainbow.hidden = YES;
@@ -708,8 +679,6 @@ static void DAOSetAnim(CALayer *layer, NSString *key, NSString *path, id from, i
             self.emitter.emitterCells = @[ cell ];
         }
         self.emitter.renderMode = kCAEmitterLayerAdditive;
-        self.emitter.emitterShape = kCAEmitterLayerRectangle;
-        [self.layer insertSublayer:self.emitter atIndex:(unsigned)self.layer.sublayers.count];
     } else {
         self.emitter.hidden = YES;
     }
@@ -798,8 +767,6 @@ static void DAORestoreDots(void) {
 //   element-identifier:systemApertureElementIdentifierScreenRecording
 // 所以必须逐个容器按自己的 identifier 分类 —— 不能「取最宽的那个」，
 // 因为录屏和时钟/音乐可以同时各有一个容器（日志 817219872.6 就是这样）。
-static NSUInteger gCaptureGraceGen = 0;
-static BOOL gCaptureGraceHidden = NO;
 static BOOL DAOHasTag(UIView *pill, NSString *token, NSInteger depth);
 static UIImageView *DAOArtworkInPill(UIView *pill, CGRect *visibleOut);
 static UIView *DAONativeRecordingIndicator(void);
@@ -1087,8 +1054,6 @@ static BOOL DAOMountSprite(BOOL left, UIView *pill, UIView *anchor,
     sp.hostView   = pill;
     sp.anchorView = anchor;
     sp.side       = side;
-    // anchor 分支在 sync 里已有 c.x += sp.xOffset，这里存原始偏移即可；
-    // 没有 anchor 时走端点公式，同样用它。
     sp.xOffset    = offset;
     sp.hidden     = NO;
     sp.alpha      = alpha;
@@ -1287,36 +1252,20 @@ static BOOL DAOMountIntoElement(UIView *elementView, BOOL left, CGFloat ratio, C
     }
     [host bringSubviewToFront:sp];
 
-    // 元素内挂载：宿主本身会跟着系统缩放，素材用固定边长 + 居中，
-    // 不用 autoresizing（那会让每帧重排、还会把圆形拉扁）。
-    sp.autoresizingMask = UIViewAutoresizingNone;
-    // anchorView 存元素本身：元素换人（左→右切换）时立刻重建，不用旧尺寸硬撑
-    if (sp.anchorView != elementView) {
-        sp.anchorView = elementView;
-        sp.startedAt = CACurrentMediaTime();
-        sp.cursor = NSUIntegerMax;
-    }
+    // 不做任何逐帧定位：自适应蒙版让系统改尺寸时它自己跟着变
+    sp.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     sp.hostView   = host;
-    sp.xOffset    = left ? offset : -offset;   // 带符号：左正右负，sync 里直接加
-    sp.side       = 0;                // 0 = 不自算 frame
+    sp.anchorView = nil;
+    sp.side       = 0;                // 0 = 不自算 frame，用 bounds 铺满
+    sp.xOffset    = 0;
+
     CGRect b = host.bounds;
     CGFloat side = MIN(b.size.width, b.size.height);
-    side = MIN(40.0, MAX(side * MAX(0.1, ratio), 6.0));
+    side = MIN(40.0, MAX(side * MAX(0.1, ratio) * MAX(0.4, 1.0), 6.0));
     side = MIN(side, 40.0);
-
-    // 水平偏移：设置里的正数 = 往该侧外移。
-    // 注意：宿主（providedView）往往只比素材大几个点，若把圆心夹在
-    // [half, w-half]，偏移可用范围只有 ±2pt —— 这就是「滑块像没效果」的原因。
-    // 所以只把圆心夹在宿主范围内，允许素材溢出宿主（下面对宿主关掉裁剪）。
-    host.clipsToBounds = NO;
-    host.layer.masksToBounds = NO;
-    CGFloat cx = b.size.width / 2.0 + (left ? offset : -offset);
-    CGFloat half = side / 2.0;
-    CGFloat slackX = b.size.width * 0.25, slackY = b.size.height * 0.25;
-    cx = MAX(half - slackX, MIN(b.size.width - half + slackX, cx));
-    CGFloat cy = b.size.height / 2.0;
-    cy = MAX(half - slackY, MIN(b.size.height - half + slackY, cy));
-    CGRect f = CGRectMake(cx - half, cy - half, side, side);
+    CGFloat inset = MAX(0.0, offset);
+    CGRect f = CGRectMake((b.size.width - side) / 2.0 + (left ? inset : -inset),
+                          (b.size.height - side) / 2.0, side, side);
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     sp.frame = f;
@@ -1505,22 +1454,14 @@ static void DAORestoreArtwork(void) {
 
 #pragma mark - 主扫描
 
-// 从元素视图往上找真正的 SBSystemApertureContainerView
-static UIView *DAOEnclosingApertureContainer(UIView *v) {
-    if (!v) return nil;
-    for (int i = 0; v && i < 18; i++, v = v.superview) {
-        NSString *n = NSStringFromClass(v.class);
-        if ([n containsString:@"SBSystemApertureContainerView"]) return v;
-    }
-    return nil;
-}
-
-// 给光圈找「该描哪一圈」：优先元素所在容器；元素还没进容器时，
-// 用屏幕矩形最接近的那个容器（而不是拿元素自己当岛）。
-static UIView *DAOApertureTargetFor(UIView *element) {
+// 光圈要描的是「岛容器」的轮廓，不是元素内容。
+// 元素可能还没被塞进容器，所以先往上找，找不到再按屏幕矩形找最接近的容器。
+static UIView *DAOApertureContainer(UIView *element) {
     if (!element) return nil;
-    UIView *c = DAOEnclosingApertureContainer(element);
-    if (c && c.window) return c;
+    UIView *v = element;
+    for (int i = 0; v && i < 18; i++, v = v.superview) {
+        if ([NSStringFromClass(v.class) containsString:@"SBSystemApertureContainerView"]) return v;
+    }
     CGRect er = DAOScreenRect(element);
     UIView *best = nil; CGFloat bestD = CGFLOAT_MAX;
     for (UIView *p in DAOPills()) {
@@ -1534,20 +1475,18 @@ static UIView *DAOApertureTargetFor(UIView *element) {
 }
 
 static void DAOAttachAperture(UIView *pill, BOOL expanded) {
-    // 传进来的可能是 SAUIElementView（元素），光圈要描的是「岛容器」的轮廓
-    UIView *container = DAOEnclosingApertureContainer(pill) ?: pill;
-    if (container != pill) pill = container;
     if (!pill || !DAOBool(@"aperture_enabled", NO)) {
         if (gAperture) [gAperture applyRect:CGRectZero active:NO];
         return;
     }
-    // 「常驻」打开时，无论岛展开还是收起、素材开关开不开，都保持光圈
     BOOL permanent = DAOBool(@"aperture_permanent", NO);
-    BOOL anyMode = DAOExpandedOn() || DAOPillOn();
-    if (!permanent && !expanded && !anyMode) {
+    if (!permanent && !expanded && !DAOAnyOn()) {
         if (gAperture) [gAperture applyRect:CGRectZero active:NO];
         return;
     }
+    // 传进来的可能是 SAUIElementView，往上换成真正的岛容器
+    UIView *cont = DAOApertureContainer(pill);
+    if (cont) pill = cont;
     if (!pill.superview && !pill.window) return;
     if (!gAperture) {
         gAperture = [[DAOApertureView alloc] initWithFrame:CGRectZero];
@@ -1557,8 +1496,7 @@ static void DAOAttachAperture(UIView *pill, BOOL expanded) {
         [gAperture removeFromSuperview];
         [pill.superview addSubview:gAperture];
     }
-    // 保证在最上层：素材和背板都不会盖住光圈
-    [pill.superview bringSubviewToFront:gAperture];
+    [pill.superview bringSubviewToFront:gAperture];   // 不被背板/素材盖住
     // 挂进 superview 后坐标空间变了：把岛的屏幕矩形换算到该视图本地坐标
     CGRect pr = DAOScreenRect(pill);
     CGRect local = pr;
@@ -1612,15 +1550,23 @@ static BOOL DAORefreshGeometryOnly(UIView *pill, CGRect pr, BOOL modeOn, BOOL ex
 
 static void DAOScan(BOOL verbose) {
     // 统一清理路径
-    #define DAO_CLEAR_ALL() do { \
+    // DAO_CLEAR_SPRITES：只清素材，光圈留着（光圈有自己的开关，不该被素材清掉）
+    #define DAO_CLEAR_SPRITES() do { \
         DAOHideSprite(YES); DAOHideSprite(NO); \
         if (gSpinView) { [gSpinView.layer removeAnimationForKey:@"dao.rot"]; gSpinView.hidden = YES; } \
-        if (gAperture) [gAperture applyRect:CGRectZero active:NO]; \
         DAORestoreArtwork(); DAORestoreDots(); DAORestoreAll(); \
+    } while (0)
+    #define DAO_CLEAR_ALL() do { \
+        DAO_CLEAR_SPRITES(); \
+        if (gAperture) [gAperture applyRect:CGRectZero active:NO]; \
     } while (0)
 
     if (!DAOAnyOn() && !DAOBool(@"aperture_enabled", NO)) { DAOPurge(); return; }
-    if (DAOAppExcluded()) { DAOPurge(); return; }
+    if (DAOAppExcluded()) {
+        DAOPurge();
+        if (gAperture) [gAperture applyRect:CGRectZero active:NO];
+        return;
+    }
 
     // ── 关键：按元素各自找容器 ─────────────────────────────────
     // 日志证据（817219872.6）：录屏容器 36.66pt 在 x=285，时钟容器 163pt 在 x=114，
@@ -1643,28 +1589,19 @@ static void DAOScan(BOOL verbose) {
                 if (DAOArtworkInPill(el, &vis) && !musEl) musEl = el;
             }
         }
-        BOOL modeOnEl = DAOExpandedOn() || DAOPillOn();
-
-        // 只开光圈、不开素材：元素路径会跳过，所以这里单独画一次。
-        // （2.0.0 把光圈塞进了素材分支里，导致「只开光圈」完全没反应。）
+        // 光圈独立于素材开关：只开光圈、不开素材动画时也必须画出来。
+        // （2.0.0 把光圈调用塞在 leftOn||rightOn 分支里，所以「只开光圈」完全没反应。）
         if (DAOBool(@"aperture_enabled", NO)) {
-            UIView *ap = nil;
-            if (recEl || musEl) {
-                ap = DAOApertureTargetFor(recEl ?: musEl);
-            } else {
-                BOOL e2 = NO;
-                UIView *mp = DAOMainPill(&e2);
-                ap = mp;
-            }
+            UIView *ap = DAOApertureContainer(recEl ?: musEl);
+            if (!ap) { BOOL e2 = NO; ap = DAOMainPill(&e2); }
             if (ap) @try { DAOAttachAperture(ap, YES); } @catch (...) {}
         }
+
+        BOOL modeOnEl = DAOExpandedOn() || DAOPillOn();
         CGFloat alphaEl = DAODouble(@"islandgv_alpha", 1.0, 0.0, 1.0);
-        BOOL leftOn  = modeOnEl && DAOBool(@"islandgv_active_custom_album", NO) && recEl
-                       && !gCaptureGraceHidden;
+        BOOL leftOn  = modeOnEl && DAOBool(@"islandgv_active_custom_album", NO) && recEl;
         BOOL rightOn = modeOnEl && DAOBool(@"islandgv_active_custom_dance", NO) && musEl;
         if (leftOn || rightOn) {
-            // 元素切换时先把原生红点压掉，避免「先看到红点、再被素材盖上」的闪一下
-            if (leftOn && DAOBool(@"islandgv_dnl_enabled", NO)) DAOHideBackdropIn(recEl, YES);
             BOOL okL = leftOn ? DAOMountIntoElement(recEl, YES,
                         DAODouble(@"islandgv_active_left_size", 0.9, 0.6, 2.0),
                         DAODouble(@"islandgv_active_left_offset", 1.5, -10.0, 10.0), alphaEl) : NO;
@@ -1687,11 +1624,6 @@ static void DAOScan(BOOL verbose) {
                            (gLeftSprite && !gLeftSprite.hidden) ? NSStringFromCGRect(gLeftSprite.frame) : @"-",
                            (gRightSprite && !gRightSprite.hidden) ? NSStringFromCGRect(gRightSprite.frame) : @"-");
                 }
-                // 光圈按「岛容器」描边，与素材开关无关
-                @try {
-                    UIView *ap = DAOApertureTargetFor(recEl ?: musEl);
-                    if (ap) DAOAttachAperture(ap, YES);
-                } @catch (...) {}
                 return;
             }
         }
@@ -1729,7 +1661,18 @@ static void DAOScan(BOOL verbose) {
     }
 
     UIView *hostPill = recPill ?: musicPill;
-    if (!hostPill) { DAO_CLEAR_ALL(); return; }
+    if (!hostPill) {
+        // 岛上没有元素（只开了光圈 / 空岛）：清素材，但光圈必须继续画。
+        DAO_CLEAR_SPRITES();
+        if (DAOBool(@"aperture_enabled", NO)) {
+            BOOL e2 = NO;
+            UIView *mp = DAOMainPill(&e2);
+            if (mp) @try { DAOAttachAperture(mp, e2); } @catch (...) {}
+        } else if (gAperture) {
+            [gAperture applyRect:CGRectZero active:NO];
+        }
+        return;
+    }
 
     BOOL expanded = NO;
     { CGRect r = DAOScreenRect(hostPill); expanded = (r.size.width > r.size.height * 2.0); }
@@ -1928,36 +1871,11 @@ static void DAOPurge(void) {
 
 #pragma mark - 通知
 
-// 录屏结束/暂停的收尾：capture 变 NO 后不要立刻撤，也不要一直挂着 ——
-// 系统移除录屏元素会延迟约 1 秒，期间 issue 就是「已经保存到相册了素材还挂着」。
-// 这里给 0.22s 宽限期：期间 capture 恢复（暂停后又继续）就取消，否则立刻撤掉。
-static void DAOCaptureGrace(BOOL captured) {
-    NSUInteger gen = ++gCaptureGraceGen;
-    if (captured) {
-        gCaptureGraceHidden = NO;
-        return;
-    }
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.22 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        if (gen != gCaptureGraceGen) return;                 // 期间恢复了，取消
-        if ([UIScreen mainScreen].isCaptured) return;
-        gCaptureGraceHidden = YES;
-        @try {
-            DAOHideSprite(YES);
-            if (gLeftSprite) gLeftSprite.anchorView = nil;
-        } @catch (...) {}
-        DAOLog(@"capture grace: hide eye");
-        DAOScanSoon(0.0, NO);
-    });
-}
-
 static void DAOObserve(void) {
     [[NSNotificationCenter defaultCenter] addObserverForName:UIScreenCapturedDidChangeNotification
                                                       object:nil queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(__unused NSNotification *n) {
-        BOOL cap = [UIScreen mainScreen].isCaptured;
-        DAOLog(@"capture -> %d", cap);
-        DAOCaptureGrace(cap);
+        DAOLog(@"capture -> %d", [UIScreen mainScreen].isCaptured);
         DAOScanSoon(0.08, YES);
         DAOScanSoon(0.20, YES);
         DAOScanSoon(0.35, YES);

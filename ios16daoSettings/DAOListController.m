@@ -72,13 +72,7 @@ static NSArray<NSString *> *DAOFolders(void) {
         for (PSSpecifier *spec in loaded) {
             if ([spec propertyForKey:@"action"]) [spec setTarget:self];
             NSString *sid = [spec propertyForKey:@"id"];
-            // 阴影 4 行：跟随「显示光圈阴影」
             if ([sid hasPrefix:@"shadow_row_"] && !shadowOn) continue;
-            // 其它 condition 依赖（光圈总开关 / 粒子开关）
-            NSString *cond = [spec propertyForKey:@"condition"];
-            if ([cond isKindOfClass:[NSString class]] && cond.length) {
-                if (![DAOPref(cond) boolValue]) continue;
-            }
             [kept addObject:spec];
         }
         _specifiers = kept;
@@ -112,10 +106,8 @@ static NSArray<NSString *> *DAOFolders(void) {
 - (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier {
     [super setPreferenceValue:value specifier:specifier];
     NSString *key = [specifier propertyForKey:@"key"];
-    // 光圈/粒子这两个「父开关」变化后，下面依赖它们的行要真正插入/移除
-    if ([key isEqualToString:@"aperture_shadow_style"] ||
-        [key isEqualToString:@"aperture_enabled"] ||
-        [key isEqualToString:@"aperture_particle_enabled"]) {
+    // 「显示光圈阴影」切换后，那 4 行要真正插入/移除，不能只改高度
+    if ([key isEqualToString:@"aperture_shadow_style"]) {
         _specifiers = nil;
         dispatch_async(dispatch_get_main_queue(), ^{
             @try { [self reloadSpecifiers]; } @catch (...) {}
