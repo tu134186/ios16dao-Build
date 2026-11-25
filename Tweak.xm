@@ -15,7 +15,7 @@
 #import <math.h>
 #import <stdio.h>
 
-static NSString *const DAOVersion  = @"1.4.1";
+static NSString *const DAOVersion  = @"1.5.0";
 static const char *const DAONotify = "com.minis.ios16dao/changed";
 static NSString *const DAORoot     = @"/var/mobile/ios16dao";
 static NSString *const DAOLogPath  = @"/var/mobile/ios16dao.log";
@@ -221,10 +221,56 @@ static NSString *DAOFolderMediaPath(void) {
 
 #pragma mark - 逐帧精灵
 
+// 逐帧精灵：用 CADisplayLink 每帧改 image，而不是 UIImageView.animationImages。
+// 依据：原版 dylib 里有 DisplayLinkHandler / AXSApertureDisplayLinkProxy /
+// stageLightsTick: / displayLinkFired: / preferredFramesPerSecond —— 它就是用
+// CADisplayLink 驱动画面的。animationImages 在 duration 很短（0.01s×24帧）时
+// 会因 CoreAnimation 时序问题直接空白，这就是「调速到最快素材消失」的根因。
 @interface DAOSpriteView : UIImageView
-- (void)play:(NSArray<UIImage *> *)frames interval:(CGFloat)interval;
+@property (nonatomic, strong) NSArray<UIImage *> *frames;
+@property (nonatomic, assign) CGFloat interval;      // 每帧秒数
+@property (nonatomic, assign) NSUInteger cursor;
+@property (nonatomic, assign) CFTimeInterval startedAt;
+- (void)playFrames:(NSArray<UIImage *> *)frames interval:(CGFloat)interval;
 - (void)halt;
 @end
+
+static NSMutableArray<DAOSpriteView *> *gAllSprites;
+static CADisplayLink *gFrameLink;
+
+static void DAOTickFrames(CADisplayLink *link) {
+    CFTimeInterval now = link.timestamp;
+    for (DAOSpriteView *sp in gAllSprites) {
+        NSArray<UIImage *> *fr = sp.frames;
+        if (!fr.count || sp.hidden || sp.interval <= 0.0) continue;
+        NSUInteger idx = (NSUInteger)((now - sp.startedAt) / sp.interval);
+        idx %= fr.count;
+        if (idx != sp.cursor) {
+            sp.cursor = idx;
+            sp.image = fr[idx];
+        }
+    }
+}
+
+static void DAOEnsureFrameLink(void) {
+    if (!gAllSprites) gAllSprites = [NSMutableArray array];
+    if (gFrameLink) return;
+    gFrameLink = [CADisplayLink displayLinkWithTarget:
+                  ({
+                      id proxy = [NSObject new];
+                      class_addMethod(proxy.class, @selector(tick:),
+                                      imp_implementationWithBlock(^(id _s, CADisplayLink *l) {
+                          DAOTickFrames(l);
+                      }), "v@:@");
+                      proxy;
+                  }) selector:@selector(tick:)];
+    if (@available(iOS 15.0, *)) {
+        gFrameLink.preferredFrameRateRange = CAFrameRateRangeMake(30, 60, 60);
+    } else {
+        gFrameLink.preferredFramesPerSecond = 60;
+    }
+    [gFrameLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+}
 
 @implementation DAOSpriteView
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -233,33 +279,33 @@ static NSString *DAOFolderMediaPath(void) {
         self.contentMode = UIViewContentModeScaleAspectFit;
         self.backgroundColor = UIColor.clearColor;
         self.layer.masksToBounds = NO;
+        DAOEnsureFrameLink();
+        [gAllSprites addObject:self];
     }
     return self;
 }
-- (void)play:(NSArray<UIImage *> *)frames interval:(CGFloat)interval {
+- (void)playFrames:(NSArray<UIImage *> *)frames interval:(CGFloat)interval {
     if (frames.count == 0) return;
-    CGFloat d = MAX(0.01, interval) * frames.count;
-    if (self.animationImages == frames) {
-        // 素材没换，只有速度变了 → 原地改 duration，不重启动画
-        if (fabs(self.animationDuration - d) > 0.001) {
-            BOOL running = self.isAnimating;
-            if (running) [self stopAnimating];
-            self.animationDuration = d;
-            if (running) [self startAnimating];   // 立刻按新速度继续
-            return;
-        }
-        if (!self.isAnimating) [self startAnimating];
-        return;
+    if (self.frames != frames) {
+        self.frames = frames;
+        self.cursor = NSUIntegerMax;
+        self.startedAt = CACurrentMediaTime();
+        self.image = frames.firstObject;
     }
-    [self stopAnimating];
-    self.animationImages = frames;
-    self.animationDuration = d;
-    self.animationRepeatCount = 0;
-    [self startAnimating];
+    CGFloat iv = MAX(0.004, interval);      // 最快 250fps，实际由 displaylink 限到 60
+    if (fabs(self.interval - iv) > 0.0005) {
+        // 速度变了：按当前位置换算成新的起点，画面不跳、不空白
+        if (self.interval > 0 && self.frames.count) {
+            NSUInteger cur = (self.cursor == NSUIntegerMax) ? 0 : self.cursor;
+            self.startedAt = CACurrentMediaTime() - (CFTimeInterval)cur * iv;
+        } else {
+            self.startedAt = CACurrentMediaTime();
+        }
+        self.interval = iv;
+    }
 }
 - (void)halt {
-    // 只停不销毁：留着重播时不用重新解包 24 张图，避免闪烁与卡顿
-    [self stopAnimating];
+    // 只停止推进，不清 frames：再次显示时立刻能接上，不会黑一下
 }
 @end
 
@@ -991,7 +1037,8 @@ static BOOL DAOPlaceSide(BOOL left, UIView *pill, CGRect pillRect,
     }
     sp.hidden = NO;
     sp.alpha = alpha;
-    [sp play:frames interval:interval];
+    if (sp.startedAt <= 0) sp.startedAt = CACurrentMediaTime();
+    [sp playFrames:frames interval:interval];
     return YES;
 }
 
@@ -1006,7 +1053,13 @@ static UIImageView *DAOArtworkInPill(UIView *pill, CGRect *visibleOut) {
             UIImageView *iv = (UIImageView *)v;
             if (iv.image) {
                 CGRect vis = CGRectIntersection(DAOScreenRect(iv), pr);
-                if (vis.size.height >= 14 && vis.size.width >= 14) {
+                if (vis.size.height >= 10 && vis.size.width >= 10) {
+                    // 必须是近似方形：封面是被容器裁出来的一个圆。
+                    // 录屏元素那张图是 172x36.67（宽高比 4.69），必须排除。
+                    CGFloat ratio = vis.size.width / MAX(1.0, vis.size.height);
+                    if (ratio < 0.65 || ratio > 1.55) continue;
+                    // 也不能大于容器高度太多
+                    if (vis.size.width > pr.size.height * 1.35) continue;
                     CGFloat sq = 1.0 - fabs(vis.size.width - vis.size.height) / MAX(vis.size.width, vis.size.height);
                     BOOL art = [NSStringFromClass(v.class).lowercaseString containsString:@"artwork"];
                     CGFloat score = sq * 2.0 + (art ? 1.5 : 0.0);
